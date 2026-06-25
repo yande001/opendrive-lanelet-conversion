@@ -488,23 +488,27 @@ def check_vm_03_02(m):
 
 
 def check_vm_03_10(m):
-    """Signed/signalised junctions should carry right_of_way regulatory elements.
+    """Right-of-way regulatory elements at junctions (vm-03-10 signed + vm-03-11
+    unsignalised right-before-left).
 
-    Source-dependent (vm-03-10/11): OpenDRIVE <junction><priority> is not parsed
-    by odr2cr (only stop/yield signs survive), so right-of-way is synthesizable
-    only where the .xodr carries that data. Reports presence; never FAILs on the
-    pure-geometry case (right-before-left synthesis is a documented follow-up).
+    The converter emits one right_of_way reg-elem per junction: signed junctions
+    carry the stop/yield signs (a `refers` member) and pair yielding connectors
+    with the unsigned priority connectors; unsignalised junctions are synthesized
+    from CommonRoad's `left_of` (right-before-left) and carry no sign. A reg-elem
+    with a `refers` member is counted as signed, otherwise right-before-left.
     """
     junction_lls = [ll for ll in m.lanelets if "turn_direction" in _tags(ll)]
     if not junction_lls:
         return CheckResult("vm-03-10", "Right of way", SKIP, "no junction lanelets in source")
     row = [r for r in m.regelems if _tags(r).get("subtype") == "right_of_way"]
-    if row:
-        return CheckResult("vm-03-10", "Right of way", PASS,
-                           "right_of_way reg-elems present", 0, len(row))
-    return CheckResult("vm-03-10", "Right of way", SKIP,
-                       "no priority/sign data in source (right-before-left synthesis deferred)",
-                       0, len(junction_lls))
+    if not row:
+        return CheckResult("vm-03-10", "Right of way", SKIP,
+                           "no right_of_way reg-elems synthesizable", 0, len(junction_lls))
+    signed = sum(1 for r in row if any(mb.get("role") == "refers" for mb in r.findall("member")))
+    rbl = len(row) - signed
+    return CheckResult("vm-03-10", "Right of way", PASS,
+                       f"right_of_way reg-elems ({signed} signed, {rbl} right-before-left)",
+                       0, len(row))
 
 
 def check_vm_04_01(m):
