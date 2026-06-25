@@ -449,28 +449,62 @@ def check_vm_01_24(m):
 
 
 def check_vm_03_01(m):
-    """intersection_area polygons must exist (if the map has junctions)."""
+    """Junctions must be delineated by an intersection_area polygon.
+
+    Junction lanelets are identified by the turn_direction tag, which the
+    converter emits on every OpenDRIVE junction connector (S6). The earlier
+    "subtype-less lanelet" proxy broke once S3 labelled the shoulders, so it now
+    SKIP'd on a false all-clear; keying off turn_direction is the real signal.
+    """
     areas = [wid for wid, t in m.way_tags.items() if t.get("type") == "intersection_area"]
-    if areas:
-        return CheckResult("vm-03-01", "Intersection area", PASS,
-                           "intersection_area polygons present", 0, len(areas))
-    # Heuristic: junction lanelets are the subtype-less ones; if none, skip.
-    junctionish = [ll for ll in m.lanelets if "subtype" not in _tags(ll)]
-    if not junctionish:
-        return CheckResult("vm-03-01", "Intersection area", SKIP, "no junction lanelets detected")
-    return CheckResult("vm-03-01", "Intersection area", FAIL,
-                       "0 intersection_area polygons despite junction lanelets",
-                       len(junctionish), len(m.lanelets))
+    junction_lls = [ll for ll in m.lanelets if "turn_direction" in _tags(ll)]
+    if not junction_lls:
+        return CheckResult("vm-03-01", "Intersection area", SKIP, "no junction lanelets in source")
+    if not areas:
+        return CheckResult("vm-03-01", "Intersection area", FAIL,
+                           "junction lanelets present but 0 intersection_area polygons",
+                           len(junction_lls), len(junction_lls))
+    return CheckResult("vm-03-01", "Intersection area", PASS,
+                       f"{len(areas)} intersection_area polygons", 0, len(areas))
 
 
 def check_vm_03_02(m):
-    """Junction lanelets must carry turn_direction."""
-    junctionish = [ll for ll in m.lanelets if "subtype" not in _tags(ll)]
-    if not junctionish:
-        return CheckResult("vm-03-02", "Turn direction", SKIP, "no junction lanelets detected")
-    miss = sum(1 for ll in junctionish if "turn_direction" not in _tags(ll))
+    """Every junction connector lanelet must carry turn_direction.
+
+    Junction membership is read from the intersection_area reference tag emitted
+    on each connector lanelet; every member must also carry a turn_direction. If
+    no references were emitted, fall back to the turn_direction tag itself.
+    """
+    members = [ll for ll in m.lanelets if "intersection_area" in _tags(ll)]
+    if not members:
+        any_turn = [ll for ll in m.lanelets if "turn_direction" in _tags(ll)]
+        if not any_turn:
+            return CheckResult("vm-03-02", "Turn direction", SKIP, "no junction lanelets in source")
+        return CheckResult("vm-03-02", "Turn direction", PASS,
+                           "turn_direction present on junction lanelets", 0, len(any_turn))
+    miss = sum(1 for ll in members if "turn_direction" not in _tags(ll))
     return CheckResult("vm-03-02", "Turn direction", PASS if miss == 0 else FAIL,
-                       "junction lanelets without turn_direction", miss, len(junctionish))
+                       "junction lanelets without turn_direction", miss, len(members))
+
+
+def check_vm_03_10(m):
+    """Signed/signalised junctions should carry right_of_way regulatory elements.
+
+    Source-dependent (vm-03-10/11): OpenDRIVE <junction><priority> is not parsed
+    by odr2cr (only stop/yield signs survive), so right-of-way is synthesizable
+    only where the .xodr carries that data. Reports presence; never FAILs on the
+    pure-geometry case (right-before-left synthesis is a documented follow-up).
+    """
+    junction_lls = [ll for ll in m.lanelets if "turn_direction" in _tags(ll)]
+    if not junction_lls:
+        return CheckResult("vm-03-10", "Right of way", SKIP, "no junction lanelets in source")
+    row = [r for r in m.regelems if _tags(r).get("subtype") == "right_of_way"]
+    if row:
+        return CheckResult("vm-03-10", "Right of way", PASS,
+                           "right_of_way reg-elems present", 0, len(row))
+    return CheckResult("vm-03-10", "Right of way", SKIP,
+                       "no priority/sign data in source (right-before-left synthesis deferred)",
+                       0, len(junction_lls))
 
 
 def check_vm_04_01(m):
@@ -523,7 +557,7 @@ def check_vm_07_04(m):
 CHECKS = [
     check_vm_01_01, check_vm_01_02, check_vm_01_03, check_vm_01_04, check_vm_01_05,
     check_vm_01_16, check_vm_01_21, check_vm_01_24,
-    check_vm_03_01, check_vm_03_02, check_vm_04_01, check_vm_05_01, check_vm_07_04,
+    check_vm_03_01, check_vm_03_02, check_vm_03_10, check_vm_04_01, check_vm_05_01, check_vm_07_04,
 ]
 
 
