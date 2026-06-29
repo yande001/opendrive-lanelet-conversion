@@ -619,6 +619,61 @@ def check_vm_03_08(m):
                        "connectors outside their intersection_area", offenders, total)
 
 
+STOP_LINE_RANGE_TOL_M = 6.0   # a stop line bounding a junction approach sits within
+                              # this of the governed lanelet's junction-facing end
+                              # (a small setback from the entry cross-section)
+
+
+def check_vm_03_09(m):
+    """Intersection lanelet range bounded by stop line (vm-03-09).
+
+    A junction approach that must stop carries a right_of_way reg-elem binding the
+    yielding lanelet to a stop_line (``ref_line``). The stop line marks where the
+    junction range begins, so it must sit at the bound lanelet's junction-facing
+    cross-section. This flags reg-elem-governed stop lines positioned more than
+    STOP_LINE_RANGE_TOL_M from any cross-section of a lanelet their reg-elem
+    references. Source-dependent: approaches with no source stop line cannot be
+    bounded and are not counted (SKIP when there are none).
+    """
+    stop_lines = {wid: m.way_polyline(wid) for wid, t in m.way_tags.items()
+                  if t.get("type") == "stop_line"}
+    if not stop_lines:
+        return CheckResult("vm-03-09", "Stop-line-bounded range", SKIP,
+                           "no stop lines in source")
+    ll_ends = {}
+    for ll in m.lanelets:
+        bw = m.lanelet_bound_ways(ll)
+        lp, rp = m.way_polyline(bw.get("left")), m.way_polyline(bw.get("right"))
+        if len(lp) < 2 or len(rp) < 2:
+            continue
+        ll_ends[ll.get("id")] = (
+            ((lp[0][0] + rp[0][0]) / 2, (lp[0][1] + rp[0][1]) / 2),
+            ((lp[-1][0] + rp[-1][0]) / 2, (lp[-1][1] + rp[-1][1]) / 2),
+        )
+    mis = total = 0
+    for r in m.regelems:
+        ref_sl = [mb.get("ref") for mb in r.findall("member")
+                  if mb.get("role") == "ref_line" and mb.get("ref") in stop_lines]
+        if not ref_sl:
+            continue
+        cross = [e for mb in r.findall("member") if mb.get("type") == "relation"
+                 for e in ll_ends.get(mb.get("ref"), ())]
+        if not cross:
+            continue
+        for s in ref_sl:
+            smp = _point_at_fraction(stop_lines[s], 0.5)
+            total += 1
+            if min(math.dist(smp, e) for e in cross) > STOP_LINE_RANGE_TOL_M:
+                mis += 1
+    if total == 0:
+        return CheckResult("vm-03-09", "Stop-line-bounded range", SKIP,
+                           "no reg-elem-governed stop lines")
+    return CheckResult("vm-03-09", "Stop-line-bounded range",
+                       PASS if mis == 0 else FAIL,
+                       "governed stop lines not at the junction range boundary",
+                       mis, total)
+
+
 def _point_at_fraction(pts, f):
     """Point at arc-length fraction ``f`` in [0, 1] along a polyline."""
     if len(pts) == 1:
@@ -787,7 +842,8 @@ CHECKS = [
     check_vm_01_01, check_vm_01_02, check_vm_01_03, check_vm_01_04, check_vm_01_05,
     check_vm_01_16, check_vm_01_21, check_vm_01_24,
     check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_07, check_vm_03_08,
-    check_vm_03_10, check_vm_04_01, check_vm_05_01, check_vm_07_04, check_vm_07_06,
+    check_vm_03_09, check_vm_03_10, check_vm_04_01, check_vm_05_01,
+    check_vm_07_04, check_vm_07_06,
 ]
 
 
