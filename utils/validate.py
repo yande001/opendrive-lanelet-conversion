@@ -33,6 +33,9 @@ CURVE_ANGLE_DEG = 160.0        # interior angle below this ⇒ the polyline is "
                                # (>20° bend; a gently-curving road keeps the 100 m
                                # straight limit, only real curves get the 20 m limit)
 SMOOTH_MIN_ANGLE_DEG = 60.0    # interior angle below this ⇒ a "jagged" kink (vm-01-05)
+CONNECTOR_WIDTH_RATIO_MAX = 2.5  # a junction connector may flare at its mouth, but a
+                                 # max/min width spread beyond this signals a geometry
+                                 # error rather than a normal turn-lane taper (vm-03-03)
 
 
 # --------------------------------------------------------------------------- #
@@ -526,6 +529,106 @@ def check_vm_03_10(m):
                        0, len(row))
 
 
+def _connector_lanelets(m):
+    """Junction connector lanelets — those the S6 pass tagged with turn_direction."""
+    return [ll for ll in m.lanelets if "turn_direction" in _tags(ll)]
+
+
+def check_vm_07_06(m):
+    """Junction lanelet completeness (vm-03-04 / vm-07-06).
+
+    'Create all intersection lanelets (incl. additional lanes)': the failure mode
+    is a dropped junction connector, which surfaces as a connector with a dangling
+    end (its missing neighbour was the lane that should have been created). Using
+    the same shared-cross-section signal as vm-01-21, a connector is complete iff
+    BOTH its end cross-sections are shared with another lanelet (entry present and
+    exit present); an open end means an adjoining lanelet is absent.
+    """
+    connectors = _connector_lanelets(m)
+    if not connectors:
+        return CheckResult("vm-07-06", "Junction lanelet completeness", SKIP,
+                           "no junction lanelets in source")
+    xsec_owners = defaultdict(int)
+    for ll in m.lanelets:
+        for cs in _lanelet_cross_sections(m, ll):
+            xsec_owners[cs] += 1
+    incomplete = 0
+    for ll in connectors:
+        cs = _lanelet_cross_sections(m, ll)
+        # a connector needs two resolvable cross-sections, each shared with
+        # at least one other lanelet (the incoming approach and the outgoing road)
+        if len(cs) < 2 or any(xsec_owners[c] < 2 for c in cs):
+            incomplete += 1
+    return CheckResult("vm-07-06", "Junction lanelet completeness",
+                       PASS if incomplete == 0 else FAIL,
+                       "connectors missing an entry/exit neighbour",
+                       incomplete, len(connectors))
+
+
+def _point_at_fraction(pts, f):
+    """Point at arc-length fraction ``f`` in [0, 1] along a polyline."""
+    if len(pts) == 1:
+        return pts[0]
+    seg = [math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
+    total = sum(seg)
+    if total == 0:
+        return pts[0]
+    target = f * total
+    acc = 0.0
+    for i, s in enumerate(seg):
+        if acc + s >= target:
+            t = (target - acc) / s if s else 0.0
+            return (pts[i][0] + t * (pts[i + 1][0] - pts[i][0]),
+                    pts[i][1] + t * (pts[i + 1][1] - pts[i][1]))
+        acc += s
+    return pts[-1]
+
+
+def _connector_widths(m, ll, n=7):
+    """Lanelet width sampled at ``n`` equal arc-length stations (left↔right gap)."""
+    bw = m.lanelet_bound_ways(ll)
+    lp, rp = m.way_polyline(bw.get("left")), m.way_polyline(bw.get("right"))
+    if len(lp) < 2 or len(rp) < 2:
+        return []
+    # align orientation so station k pairs the same end of both boundaries
+    if (math.dist(lp[0], rp[0]) + math.dist(lp[-1], rp[-1])
+            > math.dist(lp[0], rp[-1]) + math.dist(lp[-1], rp[0])):
+        rp = rp[::-1]
+    return [math.dist(_point_at_fraction(lp, k / (n - 1)), _point_at_fraction(rp, k / (n - 1)))
+            for k in range(n)]
+
+
+def check_vm_03_03(m):
+    """Intersection width/shape (vm-03-03): connector width consistent + curves smooth.
+
+    Two geometry defects are counted over junction connectors: an implausible
+    width spread (max/min sampled width above CONNECTOR_WIDTH_RATIO_MAX — beyond a
+    normal turn-lane taper), and a jagged boundary (interior kink below
+    SMOOTH_MIN_ANGLE_DEG, the vm-01-05 smoothness threshold). The worst of the two
+    counts gates the result.
+    """
+    connectors = _connector_lanelets(m)
+    if not connectors:
+        return CheckResult("vm-03-03", "Intersection width/shape", SKIP,
+                           "no junction lanelets in source")
+    bad_width = bad_smooth = 0
+    for ll in connectors:
+        w = _connector_widths(m, ll)
+        if w and min(w) > 0 and max(w) / min(w) > CONNECTOR_WIDTH_RATIO_MAX:
+            bad_width += 1
+        bw = m.lanelet_bound_ways(ll)
+        for s in ("left", "right"):
+            pts = m.way_polyline(bw.get(s))
+            if len(pts) >= 3 and _min_interior_angle(pts) < SMOOTH_MIN_ANGLE_DEG:
+                bad_smooth += 1
+                break
+    worst = max(bad_width, bad_smooth)
+    return CheckResult("vm-03-03", "Intersection width/shape",
+                       PASS if worst == 0 else FAIL,
+                       f"width-jump={bad_width} jagged={bad_smooth}",
+                       worst, len(connectors))
+
+
 def check_vm_04_01(m):
     """Traffic light basics: traffic_light ways + traffic_light reg-elem + light_bulbs."""
     tl_ways = [wid for wid, t in m.way_tags.items() if t.get("type") == "traffic_light"]
@@ -576,7 +679,8 @@ def check_vm_07_04(m):
 CHECKS = [
     check_vm_01_01, check_vm_01_02, check_vm_01_03, check_vm_01_04, check_vm_01_05,
     check_vm_01_16, check_vm_01_21, check_vm_01_24,
-    check_vm_03_01, check_vm_03_02, check_vm_03_10, check_vm_04_01, check_vm_05_01, check_vm_07_04,
+    check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_10,
+    check_vm_04_01, check_vm_05_01, check_vm_07_04, check_vm_07_06,
 ]
 
 
