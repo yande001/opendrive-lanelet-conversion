@@ -37,6 +37,7 @@ from utils.map_origin import (
     write_normalized_xodr,
 )
 from utils.autoware_config import DEFAULT_CONFIG_PATH, apply_autoware_config
+from utils.split import split_long_lanelets
 
 # --- Constants ---
 PROJ_DEG = "EPSG:4326"
@@ -212,6 +213,8 @@ def main():
     parser.add_argument("input", help="Path to .xodr file")
     parser.add_argument("output", nargs="?", help="Output .osm path (default: output/<stem>.osm)")
     parser.add_argument("--no-downsample", action="store_true", help="Skip downsampling")
+    parser.add_argument("--no-split", action="store_true",
+                        help="Skip length-based lanelet splitting (vm-01-24)")
     parser.add_argument("--no-autoware", action="store_true",
                         help="Disable Autoware-compatible tagging (lane_change, local_x/y, etc.)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH),
@@ -282,6 +285,14 @@ def main():
         osm = downsample_osm(osm, args.angle_threshold, args.min_dist)
         node_count = len(osm.findall("node"))
         print(f"Downsampled:    {node_count} nodes")
+
+        # Length-based splitting (vm-01-24) runs after downsampling so it measures
+        # the same local_x/local_y geometry the validator does; intersections are
+        # exempt (vm-03-05). Needs the metric coords downsampling produces.
+        if not args.no_split:
+            stats = split_long_lanelets(osm)
+            print(f"Split:          {stats['lanelets_split']} lanelets → "
+                  f"{stats['pieces_created']} pieces ({stats['ways_cut']} ways cut)")
 
     write_osm(osm, output_path)
     print(f"Output:         {output_path}")

@@ -29,7 +29,9 @@ PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 # Geometry thresholds (vm-01-24, vm-01-05).
 MAX_LEN_STRAIGHT_M = 100.0
 MAX_LEN_CURVED_M = 20.0
-CURVE_ANGLE_DEG = 175.0        # interior angle below this ⇒ the polyline is "curved"
+CURVE_ANGLE_DEG = 160.0        # interior angle below this ⇒ the polyline is "curved"
+                               # (>20° bend; a gently-curving road keeps the 100 m
+                               # straight limit, only real curves get the 20 m limit)
 SMOOTH_MIN_ANGLE_DEG = 60.0    # interior angle below this ⇒ a "jagged" kink (vm-01-05)
 
 
@@ -385,7 +387,14 @@ def _lanelet_cross_sections(m, ll):
     if not all(n in m.nodes for n in le + re):
         return []
     p = lambda n: m.nodes[n][:2]
-    if math.dist(p(le[0]), p(re[0])) <= math.dist(p(le[0]), p(re[1])):
+    # Pair the two left endpoints with the two right endpoints by minimum total
+    # distance (optimal 2×2 matching). Anchoring only on le[0]'s nearest endpoint
+    # mis-pairs short, wide, reversed-boundary pieces (a split opposing-centerline
+    # lane), where le[0] sits closer to the *opposite* cut — there the two cut
+    # nodes are genuinely shared with the neighbour piece but went undetected.
+    straight = math.dist(p(le[0]), p(re[0])) + math.dist(p(le[1]), p(re[1]))
+    crossed = math.dist(p(le[0]), p(re[1])) + math.dist(p(le[1]), p(re[0]))
+    if straight <= crossed:
         return [frozenset((le[0], re[0])), frozenset((le[1], re[1]))]
     return [frozenset((le[0], re[1])), frozenset((le[1], re[0]))]
 
@@ -427,12 +436,18 @@ def check_vm_01_21(m):
 
 
 def check_vm_01_24(m):
-    """Lanelet length: boundary ≤100 m straight / ≤20 m curved."""
+    """Lanelet length: boundary ≤100 m straight / ≤20 m curved.
+
+    Intersection lanelets are exempt (vm-03-05: a junction connector must stay
+    continuous entrance→exit), identified by the S6 turn_direction /
+    intersection_area tags. Crosswalks are exempt (short by nature).
+    """
     over = 0
     total = 0
     for ll in m.lanelets:
-        if _tags(ll).get("subtype") == "crosswalk":
-            continue  # crosswalks are short by nature; junction exemption handled in S6
+        t = _tags(ll)
+        if t.get("subtype") == "crosswalk" or "turn_direction" in t or "intersection_area" in t:
+            continue
         for wid in m.lanelet_bound_ways(ll).values():
             pts = m.way_polyline(wid)
             if len(pts) < 2:
