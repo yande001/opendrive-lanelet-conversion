@@ -130,21 +130,30 @@ def _simplify_way(points, angle_thrsh, min_dist):
     return [points[i] for i in _simplify_indices(points, angle_thrsh, min_dist)]
 
 
+# Ways whose nodes are point features, not lane geometry: never simplify them
+# (their nodes carry meaning — e.g. a light_bulbs node's color — and may be
+# coincident in 2D, which the simplifier would collapse).
+_FEATURE_WAY_TYPES = {"light_bulbs"}
+# Node tags to carry through the node rebuild (beyond local_x/local_y/ele).
+_PRESERVED_NODE_TAGS = ("color", "arrow")
+
+
 def downsample_osm(osm_root, angle_thrsh=DEFAULT_ANGLE_THRSH, min_dist=DEFAULT_MIN_DIST):
     """Downsample nodes in each way of the OSM tree."""
     transformer = Transformer.from_crs(PROJ_DEG, PROJ_MET, always_xy=True)
 
-    nodes = {
-        node.get("id"): (
+    nodes = {}
+    node_extra = {}  # id -> {tag: value} for preserved feature tags (e.g. bulb color)
+    for node in osm_root.findall("node"):
+        tags = {t.get("k"): t.get("v") for t in node.findall("tag")}
+        nodes[node.get("id")] = (
             float(node.get("lat")),
             float(node.get("lon")),
-            float(next(
-                (tag.get("v") for tag in node.findall("tag") if tag.get("k") == "ele"),
-                0,
-            )),
+            float(tags.get("ele", 0)),
         )
-        for node in osm_root.findall("node")
-    }
+        extra = {k: tags[k] for k in _PRESERVED_NODE_TAGS if k in tags}
+        if extra:
+            node_extra[node.get("id")] = extra
 
     new_node_id_gen = itertools.count(1_000_000)
     # Map each surviving ORIGINAL node id to one new node id. Successive lanelets
@@ -160,10 +169,14 @@ def downsample_osm(osm_root, angle_thrsh=DEFAULT_ANGLE_THRSH, min_dist=DEFAULT_M
         if len(refs) < 2:
             continue
 
-        coords = [nodes[ref][:2] for ref in refs]
-        kept_refs = [refs[i] for i in _simplify_indices(coords, angle_thrsh, min_dist)]
-        if len(kept_refs) < 2:
-            continue
+        way_type = next((t.get("v") for t in way.findall("tag") if t.get("k") == "type"), None)
+        if way_type in _FEATURE_WAY_TYPES:
+            kept_refs = refs  # point feature: keep every node, don't simplify
+        else:
+            coords = [nodes[ref][:2] for ref in refs]
+            kept_refs = [refs[i] for i in _simplify_indices(coords, angle_thrsh, min_dist)]
+            if len(kept_refs) < 2:
+                continue
 
         for nd in way.findall("nd"):
             way.remove(nd)
@@ -179,6 +192,8 @@ def downsample_osm(osm_root, angle_thrsh=DEFAULT_ANGLE_THRSH, min_dist=DEFAULT_M
                 node.append(etree.Element("tag", k="local_x", v=f"{local_x:.4f}"))
                 node.append(etree.Element("tag", k="local_y", v=f"{local_y:.4f}"))
                 node.append(etree.Element("tag", k="ele", v=f"{ele:.4f}"))
+                for k, v in node_extra.get(ref, {}).items():
+                    node.append(etree.Element("tag", k=k, v=v))
                 new_nodes[new_id] = node
             way.append(etree.Element("nd", ref=new_id))
 
