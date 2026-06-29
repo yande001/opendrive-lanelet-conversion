@@ -565,6 +565,60 @@ def check_vm_07_06(m):
                        incomplete, len(connectors))
 
 
+def _point_in_ring(pt, ring):
+    """Ray-cast point-in-polygon test; ``ring`` is a list of (x, y) (auto-closed)."""
+    x, y = pt
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def check_vm_03_08(m):
+    """Intersection area range (vm-03-08): the polygon must cover its connectors.
+
+    vm-03-01 only checks an intersection_area exists; this checks it actually
+    bounds the junction's range — every connector that references an
+    intersection_area must have its mid-station centerline point inside that
+    polygon. That point (mean of the two boundary midpoints) sits squarely on the
+    lanelet, so it is stable under the downsample/split that runs after emission;
+    the plain boundary centroid is not — on a tight turn it lands inside the curve,
+    off the lanelet. A connector outside its area means the range is mis-delineated.
+    """
+    areas = {wid: m.way_polyline(wid) for wid, t in m.way_tags.items()
+             if t.get("type") == "intersection_area"}
+    connectors = _connector_lanelets(m)
+    if not connectors:
+        return CheckResult("vm-03-08", "Intersection area range", SKIP,
+                           "no junction lanelets in source")
+    if not areas:
+        return CheckResult("vm-03-08", "Intersection area range", SKIP,
+                           "no intersection_area polygons (presence is vm-03-01)")
+    offenders = total = 0
+    for ll in connectors:
+        ring = areas.get(_tags(ll).get("intersection_area"))
+        if not ring or len(ring) < 4:
+            continue
+        bw = m.lanelet_bound_ways(ll)
+        lp, rp = m.way_polyline(bw.get("left")), m.way_polyline(bw.get("right"))
+        if len(lp) < 2 or len(rp) < 2:
+            continue
+        lm, rm = _point_at_fraction(lp, 0.5), _point_at_fraction(rp, 0.5)
+        midpoint = ((lm[0] + rm[0]) / 2, (lm[1] + rm[1]) / 2)
+        total += 1
+        if not _point_in_ring(midpoint, ring):
+            offenders += 1
+    return CheckResult("vm-03-08", "Intersection area range",
+                       PASS if offenders == 0 else FAIL,
+                       "connectors outside their intersection_area", offenders, total)
+
+
 def _point_at_fraction(pts, f):
     """Point at arc-length fraction ``f`` in [0, 1] along a polyline."""
     if len(pts) == 1:
@@ -679,7 +733,7 @@ def check_vm_07_04(m):
 CHECKS = [
     check_vm_01_01, check_vm_01_02, check_vm_01_03, check_vm_01_04, check_vm_01_05,
     check_vm_01_16, check_vm_01_21, check_vm_01_24,
-    check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_10,
+    check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_08, check_vm_03_10,
     check_vm_04_01, check_vm_05_01, check_vm_07_04, check_vm_07_06,
 ]
 
