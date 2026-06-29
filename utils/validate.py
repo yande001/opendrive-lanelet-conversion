@@ -652,6 +652,59 @@ def _connector_widths(m, ll, n=7):
             for k in range(n)]
 
 
+CONNECTOR_SHARE_TOL_M = 0.1   # two connector boundaries within this over their full
+                              # length are the same physical line ⇒ should be one way
+
+
+def _polyline_gap(a, b, n=5):
+    """Orientation-independent max distance between two polylines sampled at ``n``
+    arc-length stations — a proxy for 'are these the same physical line'."""
+    if len(a) < 2 or len(b) < 2:
+        return float("inf")
+    fa = [_point_at_fraction(a, k / (n - 1)) for k in range(n)]
+    fb = [_point_at_fraction(b, k / (n - 1)) for k in range(n)]
+    fwd = max(math.dist(fa[k], fb[k]) for k in range(n))
+    rev = max(math.dist(fa[k], fb[n - 1 - k]) for k in range(n))
+    return min(fwd, rev)
+
+
+def check_vm_03_07(m):
+    """Adjacent connecting lanes must share their dividing linestring (vm-03-07).
+
+    odr2cr leaves connector adjacency unset, so S4's adjacency-based sharing never
+    fires for junction connectors and only its ~1 mm equal-vertex-count geometric
+    fallback does. This flags connector-boundary pairs within one junction that
+    coincide over their whole length (within CONNECTOR_SHARE_TOL_M) yet were
+    emitted as two distinct ways — an unmerged shared line. Genuinely gapped
+    adjacent lanes (a real lane-marking gap) are correctly not merged and not
+    counted; the residual here is the same coincident-but-mismatched-vertex-count
+    class accepted for vm-01-04 / vm-01-16.
+    """
+    connectors = _connector_lanelets(m)
+    if not connectors:
+        return CheckResult("vm-03-07", "Adjacent connector sharing", SKIP,
+                           "no junction lanelets in source")
+    by_area = defaultdict(set)
+    for ll in connectors:
+        area = _tags(ll).get("intersection_area")
+        for wid in m.lanelet_bound_ways(ll).values():
+            by_area[area].add(wid)
+    unmerged = 0
+    total = 0
+    for ways in by_area.values():
+        wl = [w for w in ways if _polyline_len(m.way_polyline(w)) > MIN_BOUNDARY_LEN_M]
+        total += len(wl)
+        polys = {w: m.way_polyline(w) for w in wl}
+        for i in range(len(wl)):
+            for j in range(i + 1, len(wl)):
+                if _polyline_gap(polys[wl[i]], polys[wl[j]]) < CONNECTOR_SHARE_TOL_M:
+                    unmerged += 1
+    return CheckResult("vm-03-07", "Adjacent connector sharing",
+                       PASS if unmerged == 0 else FAIL,
+                       "coincident connector boundaries emitted as separate ways",
+                       unmerged, total)
+
+
 def check_vm_03_03(m):
     """Intersection width/shape (vm-03-03): connector width consistent + curves smooth.
 
@@ -733,8 +786,8 @@ def check_vm_07_04(m):
 CHECKS = [
     check_vm_01_01, check_vm_01_02, check_vm_01_03, check_vm_01_04, check_vm_01_05,
     check_vm_01_16, check_vm_01_21, check_vm_01_24,
-    check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_08, check_vm_03_10,
-    check_vm_04_01, check_vm_05_01, check_vm_07_04, check_vm_07_06,
+    check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_07, check_vm_03_08,
+    check_vm_03_10, check_vm_04_01, check_vm_05_01, check_vm_07_04, check_vm_07_06,
 ]
 
 
