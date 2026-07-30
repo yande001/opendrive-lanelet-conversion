@@ -29,9 +29,12 @@ PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 # Geometry thresholds (vm-01-24, vm-01-05).
 MAX_LEN_STRAIGHT_M = 100.0
 MAX_LEN_CURVED_M = 20.0
-CURVE_ANGLE_DEG = 160.0        # interior angle below this ⇒ the polyline is "curved"
-                               # (>20° bend; a gently-curving road keeps the 100 m
-                               # straight limit, only real curves get the 20 m limit)
+CURVE_WINDOW_M = MAX_LEN_CURVED_M   # arc-length window over which curvature is measured
+CURVE_TURN_DEG = 20.0          # if the heading turns more than this over any
+                               # CURVE_WINDOW_M-long window the polyline is "curved"
+                               # (≈57 m radius); measured as *accumulated* turning, not
+                               # a single-vertex angle, so a smoothly-sampled bend that
+                               # turns tens of degrees is detected (vm-01-24).
 SMOOTH_MIN_ANGLE_DEG = 60.0    # interior angle below this ⇒ a "jagged" kink (vm-01-05)
 CONNECTOR_WIDTH_RATIO_MAX = 2.5  # a junction connector may flare at its mouth, but a
                                  # max/min width spread beyond this signals a geometry
@@ -135,6 +138,85 @@ def _min_interior_angle(pts):
         cosang = max(min((v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2), 1.0), -1.0)
         worst = min(worst, math.degrees(math.acos(cosang)))
     return worst
+
+
+CURVE_RESAMPLE_STEP_M = 1.0    # resample step for the curvature metric
+
+
+def _resample_polyline(pts, step):
+    """Points at ~``step`` arc-length spacing along ``pts`` (endpoints preserved)."""
+    cum = [0.0]
+    for i in range(len(pts) - 1):
+        cum.append(cum[-1] + math.dist(pts[i], pts[i + 1]))
+    total = cum[-1]
+    if total <= 0:
+        return list(pts)
+    n = max(1, int(round(total / step)))
+    out, j = [], 0
+    for s_i in range(n + 1):
+        s = total * s_i / n
+        while j < len(cum) - 2 and cum[j + 1] < s:
+            j += 1
+        seg = cum[j + 1] - cum[j]
+        t = (s - cum[j]) / seg if seg > 0 else 0.0
+        out.append((pts[j][0] + t * (pts[j + 1][0] - pts[j][0]),
+                    pts[j][1] + t * (pts[j + 1][1] - pts[j][1])))
+    return out
+
+
+def _curve_turn_over_window(pts, window):
+    """Maximum accumulated heading change (deg) over any arc-length window ≤ ``window``.
+
+    Unlike ``_min_interior_angle`` (the sharpest *single* vertex), this sums the
+    turning of a whole stretch, so a gradual, finely-sampled curve — each vertex
+    bending only a few degrees but turning through tens of degrees overall — is
+    detected. That is the case that made vm-01-24 mis-size curved lanelets.
+
+    The polyline is first resampled to a fixed step so the result is independent
+    of the original vertex spacing. Without this, summing *discrete* per-vertex
+    deflections inside an arc-length window makes the value jitter by one
+    deflection increment as a cut inserts a node — a way and its own pieces could
+    then disagree on curved/straight right at the threshold (vm-01-24 flapping).
+    """
+    if len(pts) < 3:
+        return 0.0
+    rs = _resample_polyline(pts, CURVE_RESAMPLE_STEP_M)
+    if len(rs) < 3:
+        return 0.0
+    seglen, heading = [], []
+    for i in range(len(rs) - 1):
+        dx, dy = rs[i + 1][0] - rs[i][0], rs[i + 1][1] - rs[i][1]
+        d = math.hypot(dx, dy)
+        seglen.append(d)
+        heading.append(math.atan2(dy, dx) if d > 0 else (heading[-1] if heading else 0.0))
+    # defl[k] = turn (deg) at the interior vertex joining segment k-1 and segment k
+    defl = [0.0] * len(seglen)
+    for k in range(1, len(seglen)):
+        a = heading[k] - heading[k - 1]
+        a = (a + math.pi) % (2 * math.pi) - math.pi   # wrap to (-π, π]
+        defl[k] = abs(math.degrees(a))
+    # two-pointer window over segments [lo..hi]; run = Σ defl at interior vertices (lo, hi]
+    best = run = length = 0.0
+    lo = 0
+    for hi in range(len(seglen)):
+        length += seglen[hi]
+        run += defl[hi]
+        while length > window and lo < hi:
+            length -= seglen[lo]
+            run -= defl[lo + 1]
+            lo += 1
+        best = max(best, run)
+    return best
+
+
+def _length_limit(pts):
+    """Max allowed boundary length (m): ``MAX_LEN_CURVED_M`` if the polyline curves
+    (heading turns more than ``CURVE_TURN_DEG`` over any ``CURVE_WINDOW_M`` window),
+    else ``MAX_LEN_STRAIGHT_M``. The single classifier shared by the splitter
+    (``utils.split``) and the checker (``check_vm_01_24``) so they cannot diverge.
+    """
+    curved = _curve_turn_over_window(pts, CURVE_WINDOW_M) > CURVE_TURN_DEG
+    return MAX_LEN_CURVED_M if curved else MAX_LEN_STRAIGHT_M
 
 
 # --------------------------------------------------------------------------- #
@@ -456,9 +538,7 @@ def check_vm_01_24(m):
             if len(pts) < 2:
                 continue
             total += 1
-            curved = _min_interior_angle(pts) < CURVE_ANGLE_DEG
-            limit = MAX_LEN_CURVED_M if curved else MAX_LEN_STRAIGHT_M
-            if _polyline_len(pts) > limit:
+            if _polyline_len(pts) > _length_limit(pts):
                 over += 1
     if total == 0:
         return CheckResult("vm-01-24", "Lanelet splitting", SKIP, "no lanelet boundaries")

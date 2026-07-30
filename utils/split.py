@@ -31,10 +31,7 @@ from lxml import etree
 
 from utils.validate import (
     _polyline_len,
-    _min_interior_angle,
-    MAX_LEN_STRAIGHT_M,
-    MAX_LEN_CURVED_M,
-    CURVE_ANGLE_DEG,
+    _length_limit,
 )
 
 SNAP_M = 0.1  # a cut landing within this of an existing node reuses that node
@@ -130,8 +127,7 @@ def split_long_lanelets(osm_root):
         if len(pts) < 2:
             return 1
         length = _polyline_len(pts)
-        curved = _min_interior_angle(pts) < CURVE_ANGLE_DEG
-        limit = MAX_LEN_CURVED_M if curved else MAX_LEN_STRAIGHT_M
+        limit = _length_limit(pts)
         return math.ceil(length / limit) if length > limit + 1e-9 else 1
 
     base_need = {wid: way_need(wid) for wid in ways}
