@@ -38,6 +38,7 @@ from utils.map_origin import (
 )
 from utils.autoware_config import DEFAULT_CONFIG_PATH, apply_autoware_config
 from utils.split import split_long_lanelets
+from utils.dedup import dedup_lanelets
 
 # --- Constants ---
 PROJ_DEG = "EPSG:4326"
@@ -230,6 +231,8 @@ def main():
     parser.add_argument("--no-downsample", action="store_true", help="Skip downsampling")
     parser.add_argument("--no-split", action="store_true",
                         help="Skip length-based lanelet splitting (vm-01-24)")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="Skip duplicate-lanelet removal (vm-07-08)")
     parser.add_argument("--no-autoware", action="store_true",
                         help="Disable Autoware-compatible tagging (lane_change, local_x/y, etc.)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH),
@@ -294,6 +297,14 @@ def main():
     mapping_path = output_path.with_name(f"id_mapping_{stem}.csv")
     write_id_mapping(converter, mapping_path)
     print(f"ID mapping:     {mapping_path} ({len(converter.odr_to_l2_mapping)} entries)")
+
+    # Remove duplicate lanelet relations (vm-07-08). Independent of downsampling —
+    # odr2cr emits identical relations (e.g. junction-mouth approach stubs) that
+    # would otherwise fully overlap. Kept before splitting so pieces aren't cloned.
+    if not args.no_dedup:
+        dstats = dedup_lanelets(osm)
+        print(f"Dedup:          removed {dstats['lanelets_removed']} duplicate "
+              f"lanelets ({dstats['duplicate_groups']} groups)")
 
     # Downsample
     if not args.no_downsample:

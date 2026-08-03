@@ -39,6 +39,11 @@ SMOOTH_MIN_ANGLE_DEG = 60.0    # interior angle below this ⇒ a "jagged" kink (
 CONNECTOR_WIDTH_RATIO_MAX = 2.5  # a junction connector may flare at its mouth, but a
                                  # max/min width spread beyond this signals a geometry
                                  # error rather than a normal turn-lane taper (vm-03-03)
+OVERLAP_TOL_M = 0.5              # boundaries within this trace the same physical edge
+                                 # ⇒ two lanelets occupy the same strip (vm-07-08)
+OVERLAP_ELE_TOL_M = 0.5         # mean-elevation gap above this ⇒ a legal multi-level
+                                 # stack (overpass/tunnel), not an illegal overlap
+OVERLAP_GRID_M = 5.0            # centroid-bucket cell for the O(n) candidate search
 
 
 # --------------------------------------------------------------------------- #
@@ -909,6 +914,156 @@ def check_vm_05_01(m):
                        len(missing), 3)
 
 
+def _sample_n(pts, n):
+    """``n`` points (n≥2) evenly spaced by arc length along ``pts``, endpoints kept.
+
+    Unlike ``_resample_polyline`` (fixed *step* ⇒ count depends on length) this
+    yields a fixed *count*, so two polylines of the same edge but different vertex
+    spacing become directly comparable point-for-point.
+    """
+    cum = [0.0]
+    for i in range(len(pts) - 1):
+        cum.append(cum[-1] + math.dist(pts[i], pts[i + 1]))
+    total = cum[-1]
+    if total <= 0:
+        return [tuple(pts[0])] * n
+    out, j = [], 0
+    for i in range(n):
+        s = total * i / (n - 1)
+        while j < len(cum) - 2 and cum[j + 1] < s:
+            j += 1
+        seg = cum[j + 1] - cum[j]
+        t = (s - cum[j]) / seg if seg > 0 else 0.0
+        out.append((pts[j][0] + t * (pts[j + 1][0] - pts[j][0]),
+                    pts[j][1] + t * (pts[j + 1][1] - pts[j][1])))
+    return out
+
+
+def _polylines_coincident(a, b, tol, n=12):
+    """True if ``a`` and ``b`` trace the same physical edge (either direction).
+
+    Vertex-count independent (both resampled to ``n`` points), with a length-ratio
+    pre-filter so a short stub cannot match a long boundary that happens to start
+    nearby.
+    """
+    if len(a) < 2 or len(b) < 2:
+        return False
+    la, lb = _polyline_len(a), _polyline_len(b)
+    if min(la, lb) < MIN_BOUNDARY_LEN_M or min(la, lb) / max(la, lb) < 0.9:
+        return False
+    sa, sb = _sample_n(a, n), _sample_n(b, n)
+    fwd = max(math.dist(sa[i], sb[i]) for i in range(n))
+    rev = max(math.dist(sa[i], sb[n - 1 - i]) for i in range(n))
+    return min(fwd, rev) < tol
+
+
+def _way_mean_ele(m, wid):
+    eles = [m.nodes[nd][2] for nd in m.way_nodes.get(wid, [])
+            if nd in m.nodes and m.nodes[nd][2] is not None]
+    return sum(eles) / len(eles) if eles else None
+
+
+def _lanelet_dir(lp, rp):
+    """Unit travel-direction vector (start→end cross-section midpoints)."""
+    sx, sy = (lp[0][0] + rp[0][0]) / 2, (lp[0][1] + rp[0][1]) / 2
+    ex, ey = (lp[-1][0] + rp[-1][0]) / 2, (lp[-1][1] + rp[-1][1]) / 2
+    dx, dy = ex - sx, ey - sy
+    d = math.hypot(dx, dy)
+    return (dx / d, dy / d) if d > 0 else None
+
+
+def check_vm_07_08(m):
+    """Overlapping lanes: no two lanelets occupy the *same* strip.
+
+    A full overlap is two lanelets whose *both* boundaries coincide (same left+right
+    edge, in either assignment) — a duplicated lane. Lateral neighbours share only
+    one boundary and successors share only a cross-section, so neither registers.
+    Two legal exceptions are excused (vm-07-08 wording): a **multi-level** stack
+    (mean elevations differ by > OVERLAP_ELE_TOL_M — an overpass/tunnel over the
+    same ground plan) and a **bidirectional** pair (the two lanelets traverse the
+    strip in opposite directions, or either is tagged one_way=no). Anything left is
+    an illegal same-level, same-direction duplicate.
+
+    Candidate pairs are found via a centroid grid, so the scan is ~O(n).
+    Scope is **non-junction drivable lanes** (subtype road). Two exclusions:
+    walkways/road_shoulders/crosswalks legitimately trace the same edge as the
+    adjacent furniture (a sidewalk and a shoulder stacked on one narrow strip);
+    and intersection lanelets (``turn_direction`` / ``intersection_area``) are
+    exempt because several maneuvers legally share one junction-mouth stub — the
+    same exemption vm-01-24 / vm-03-05 make. Autoware disambiguates those via
+    turn_direction + right_of_way, so overlapping connectors are not a defect.
+    """
+    items = []
+    for ll in m.lanelets:
+        t = _tags(ll)
+        if t.get("subtype") != "road":
+            continue
+        if "turn_direction" in t or "intersection_area" in t:
+            continue
+        bw = m.lanelet_bound_ways(ll)
+        lw, rw = bw.get("left"), bw.get("right")
+        lp, rp = m.way_polyline(lw), m.way_polyline(rw)
+        if len(lp) < 2 or len(rp) < 2:
+            continue
+        if max(_polyline_len(lp), _polyline_len(rp)) < MIN_BOUNDARY_LEN_M:
+            continue
+        allpts = lp + rp
+        cx = sum(p[0] for p in allpts) / len(allpts)
+        cy = sum(p[1] for p in allpts) / len(allpts)
+        ele = [e for e in (_way_mean_ele(m, lw), _way_mean_ele(m, rw)) if e is not None]
+        items.append({
+            "lp": lp, "rp": rp, "cx": cx, "cy": cy,
+            "ele": sum(ele) / len(ele) if ele else None,
+            "dir": _lanelet_dir(lp, rp),
+            "one_way": t.get("one_way"),
+        })
+    if len(items) < 2:
+        return CheckResult("vm-07-08", "Overlapping lanes", SKIP, "fewer than two lanelets")
+
+    buckets = defaultdict(list)
+    for idx, it in enumerate(items):
+        buckets[(round(it["cx"] / OVERLAP_GRID_M), round(it["cy"] / OVERLAP_GRID_M))].append(idx)
+
+    illegal = overlaps = 0
+    checked = set()
+    for (gx, gy), idxs in buckets.items():
+        cand = [j for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                for j in buckets.get((gx + dx, gy + dy), [])]
+        for i in idxs:
+            a = items[i]
+            for j in cand:
+                if j <= i:
+                    continue
+                key = (i, j)
+                if key in checked:
+                    continue
+                checked.add(key)
+                b = items[j]
+                if math.hypot(a["cx"] - b["cx"], a["cy"] - b["cy"]) > OVERLAP_GRID_M:
+                    continue
+                same = (_polylines_coincident(a["lp"], b["lp"], OVERLAP_TOL_M)
+                        and _polylines_coincident(a["rp"], b["rp"], OVERLAP_TOL_M))
+                crossed = (_polylines_coincident(a["lp"], b["rp"], OVERLAP_TOL_M)
+                           and _polylines_coincident(a["rp"], b["lp"], OVERLAP_TOL_M))
+                if not (same or crossed):
+                    continue
+                overlaps += 1
+                # legal exception 1: multi-level stack
+                if a["ele"] is not None and b["ele"] is not None \
+                        and abs(a["ele"] - b["ele"]) > OVERLAP_ELE_TOL_M:
+                    continue
+                # legal exception 2: bidirectional (opposing dir, or declared two-way)
+                opposing = (a["dir"] and b["dir"]
+                            and a["dir"][0] * b["dir"][0] + a["dir"][1] * b["dir"][1] < 0)
+                if opposing or a["one_way"] == "no" or b["one_way"] == "no":
+                    continue
+                illegal += 1
+
+    return CheckResult("vm-07-08", "Overlapping lanes", PASS if illegal == 0 else FAIL,
+                       f"illegal full overlaps ({overlaps} overlapping pairs, "
+                       f"multi-level/bidirectional excused)", illegal, len(items))
+
+
 def check_vm_07_04(m):
     """Every node must carry an ele tag."""
     if not m.nodes:
@@ -923,7 +1078,7 @@ CHECKS = [
     check_vm_01_16, check_vm_01_21, check_vm_01_24,
     check_vm_03_01, check_vm_03_02, check_vm_03_03, check_vm_03_07, check_vm_03_08,
     check_vm_03_09, check_vm_03_10, check_vm_04_01, check_vm_05_01,
-    check_vm_07_04, check_vm_07_06,
+    check_vm_07_04, check_vm_07_06, check_vm_07_08,
 ]
 
 
