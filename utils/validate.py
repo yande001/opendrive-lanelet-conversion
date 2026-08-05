@@ -255,15 +255,77 @@ def check_vm_01_01(m):
                        worst, len(roads))
 
 
+BORDER_COINCIDENT_TOL_M = 0.50    # boundary ways within this trace the same physical line
+                                  # (matches vm-01-04's coincidence tol)
+
+
+def _coincident_boundary_ids(m, tol=BORDER_COINCIDENT_TOL_M):
+    """Boundary ways that trace the same physical line as another boundary way.
+
+    Mirrors utils/road_border.py: two opposing road lanelets that each keep
+    their own (unmerged) way for the shared centerline both look like outer
+    edges by reference count, but they are a crossable interior divider. A true
+    outer edge has no coincident boundary twin. Endpoint-bucketed (1 m) so the
+    pairwise test stays ~O(n); a reversed polyline lands in the same bucket.
+    """
+    polys = {}
+    for ll in m.lanelets:
+        for wid in m.lanelet_bound_ways(ll).values():
+            if wid in polys:
+                continue
+            pts = m.way_polyline(wid)
+            if len(pts) >= 2 and _polyline_len(pts) >= MIN_BOUNDARY_LEN_M:
+                polys[wid] = pts
+    buckets = defaultdict(list)
+    for wid, pts in polys.items():
+        p0 = (round(pts[0][0]), round(pts[0][1]))
+        p1 = (round(pts[-1][0]), round(pts[-1][1]))
+        buckets[tuple(sorted((p0, p1)))].append(wid)
+    hit = set()
+    for group in buckets.values():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                if _polylines_equal(polys[group[i]], polys[group[j]], tol):
+                    hit.add(group[i])
+                    hit.add(group[j])
+    return hit
+
+
 def check_vm_01_02(m):
-    """Boundary line ways must carry lane_change."""
-    lines = [wid for wid, t in m.way_tags.items()
-             if t.get("type") in ("line_thin", "line_thick", "road_border")]
-    if not lines:
-        return CheckResult("vm-01-02", "Lane-change allowance", SKIP, "no marking line ways")
-    miss = sum(1 for wid in lines if "lane_change" not in m.way_tags[wid])
-    return CheckResult("vm-01-02", "Lane-change allowance", PASS if miss == 0 else FAIL,
-                       f"lines without lane_change", miss, len(lines))
+    """Every boundary line must carry a `type` and `lane_change`.
+
+    The requirement: lines (`way`) must have `type` (`line_thin`/`line_thick`/
+    `road_border`) and `lane_change` (painted lines also carry `subtype`). Only
+    drivable-lanelet boundaries (`subtype:road`/`road_shoulder`) are graded — a
+    sidewalk/crosswalk edge is not a lane line. Crossable unmarked dividers
+    between two `subtype:road` lanelets are exempt (the source authors no
+    marking and the divider is genuinely crossable; left untyped by policy, see
+    utils/road_border.py) — whether modelled as one shared way or as two
+    coincident-but-unmerged ways.
+    """
+    refs = defaultdict(list)               # boundary way id -> neighbour subtypes
+    for ll in m.lanelets:
+        sub = _tags(ll).get("subtype")
+        for wid in m.lanelet_bound_ways(ll).values():
+            refs[wid].append(sub)
+    if not refs:
+        return CheckResult("vm-01-02", "Boundary line tags", SKIP, "no boundary ways")
+    coincident = _coincident_boundary_ids(m)
+    miss = total = 0
+    for wid, subs in refs.items():
+        if not any(s in ("road", "road_shoulder") for s in subs):
+            continue                       # non-carriageway boundary (sidewalk/crosswalk) — not graded
+        if len(subs) >= 2 and all(s == "road" for s in subs):
+            continue                       # crossable unmarked interior divider — exempt
+        if wid in coincident:
+            continue                       # coincident-but-unmerged opposing centerline — exempt
+        total += 1
+        t = m.way_tags.get(wid, {})
+        if t.get("type") not in ("line_thin", "line_thick", "road_border") \
+                or "lane_change" not in t:
+            miss += 1
+    return CheckResult("vm-01-02", "Boundary line tags", PASS if miss == 0 else FAIL,
+                       "boundary lines missing type/lane_change", miss, total)
 
 
 def check_vm_01_03(m):

@@ -39,6 +39,7 @@ from utils.map_origin import (
 from utils.autoware_config import DEFAULT_CONFIG_PATH, apply_autoware_config
 from utils.split import split_long_lanelets
 from utils.dedup import dedup_lanelets
+from utils.road_border import add_road_borders
 
 # --- Constants ---
 PROJ_DEG = "EPSG:4326"
@@ -233,6 +234,8 @@ def main():
                         help="Skip length-based lanelet splitting (vm-01-24)")
     parser.add_argument("--no-dedup", action="store_true",
                         help="Skip duplicate-lanelet removal (vm-07-08)")
+    parser.add_argument("--no-road-border", action="store_true",
+                        help="Skip road_border tagging of unmarked road edges (vm-01-02)")
     parser.add_argument("--no-autoware", action="store_true",
                         help="Disable Autoware-compatible tagging (lane_change, local_x/y, etc.)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH),
@@ -319,6 +322,14 @@ def main():
             stats = split_long_lanelets(osm)
             print(f"Split:          {stats['lanelets_split']} lanelets → "
                   f"{stats['pieces_created']} pieces ({stats['ways_cut']} ways cut)")
+
+    # Tag unmarked physical road edges as road_border (vm-01-02). Runs last so
+    # every final boundary-way piece (post-split) is classified. Interior unmarked
+    # dividers between two road lanes are left untyped by policy.
+    if not args.no_road_border:
+        bstats = add_road_borders(osm)
+        print(f"Road borders:   tagged {bstats['borders_tagged']} unmarked edges "
+              f"as road_border")
 
     write_osm(osm, output_path)
     print(f"Output:         {output_path}")
