@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<OpenDRIVE>
+    <header revMajor="1" revMinor="6" version="1.3"/>
+    <road id="1" junction="-1" length="800.0" name="R1" rule="RHT">
+        <!-- Initial section -->
+        <type s="0.0" type="town">
+            <speed max="43.50" unit="mph"/>
+        </type>
+
+        <!-- Lower speed limit section starts at s_change -->
+        <type s="400.0" type="town">
+            <speed max="49.71" unit="mph"/>
+        </type>
+        <planView>
+            <geometry hdg="0.0" length="800.0" s="0.0" x="0.0" y="0.0">
+                <line/>
+            </geometry>
+        </planView>
+        <lanes>
+            <laneSection s="0.0">
+                <left>
+                    <lane id="4" level="true" type="driving">
+                        <width a="3.55" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="solid"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                    <lane id="3" level="true" type="driving">
+                        <width a="3.55" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="broken"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                    <lane id="2" level="true" type="driving">
+                        <width a="3.55" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="broken"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                </left>
+                <center>
+                    <lane id="0" level="true" type="driving">
+                        <width a="0.0" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="solid"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                </center>
+                <right>
+                    <lane id="-1" level="true" type="driving">
+                        <width a="3.55" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="broken"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                    <lane id="-2" level="true" type="driving">
+                        <width a="3.55" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="broken"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                    <lane id="-3" level="true" type="driving">
+                        <width a="3.55" b="0.0" c="0.0" d="0.0" sOffset="0.0"/>
+                        <roadMark color="standard" sOffset="0.0" type="solid"/>
+                        <speed sOffset="0.0000000000000000e+00" max="5.5000000000000000e+01" unit="mph"/>
+                        <material friction="0" sOffset="0.0"/>
+                    </lane>
+                </right>
+            </laneSection>
+        </lanes>
+        <objects/>
+    </road>
+</OpenDRIVE>

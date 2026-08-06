@@ -38,6 +38,7 @@ set_list = [
     "esmini",
     "SafetyPool_Emil",
     "custom",
+    "vision_pilot_scenarios",
 ]
 
 # Output handling
