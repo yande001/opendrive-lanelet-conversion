@@ -321,7 +321,8 @@ def main():
         if not args.no_split:
             stats = split_long_lanelets(osm)
             print(f"Split:          {stats['lanelets_split']} lanelets → "
-                  f"{stats['pieces_created']} pieces ({stats['ways_cut']} ways cut)")
+                  f"{stats['pieces_created']} pieces ({stats['ways_cut']} ways cut, "
+                  f"{stats['boundaries_decoupled']} walkway boundaries decoupled)")
 
     # Tag unmarked physical road edges as road_border (vm-01-02). Runs last so
     # every final boundary-way piece (post-split) is classified. Interior unmarked

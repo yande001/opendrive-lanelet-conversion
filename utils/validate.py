@@ -30,11 +30,23 @@ PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 MAX_LEN_STRAIGHT_M = 100.0
 MAX_LEN_CURVED_M = 20.0
 CURVE_WINDOW_M = MAX_LEN_CURVED_M   # arc-length window over which curvature is measured
-CURVE_TURN_DEG = 20.0          # if the heading turns more than this over any
+CURVE_TURN_DEG = 8.0           # if the heading turns more than this over any
                                # CURVE_WINDOW_M-long window the polyline is "curved"
-                               # (≈57 m radius); measured as *accumulated* turning, not
-                               # a single-vertex angle, so a smoothly-sampled bend that
+                               # (≈143 m radius: turn°/window ≈ 1146/R, so 8°/20 m ⇒
+                               # R≈143 m). Chosen so a 100 m-radius bend (~11.5°/20 m)
+                               # counts as curved while a 200 m-radius one (~6°) stays
+                               # straight — the midpoint of those two separates them
+                               # robustly. Measured as *accumulated* turning, not a
+                               # single-vertex angle, so a smoothly-sampled bend that
                                # turns tens of degrees is detected (vm-01-24).
+SPLIT_LIMIT_RATIO = 0.9        # the splitter aims for pieces at this fraction of the
+                               # graded limit (≈18 m curved / 90 m straight). A lanelet's
+                               # left and right are cut at the *same* fractions to keep
+                               # the pieces square (so their shared cut cross-sections
+                               # register as connected — vm-01-21); the two boundaries
+                               # differ slightly in arc length, so the longer side's
+                               # pieces run a few % over the fraction target. The slack
+                               # keeps them under the checker's limit.
 SMOOTH_MIN_ANGLE_DEG = 60.0    # interior angle below this ⇒ a "jagged" kink (vm-01-05)
 CONNECTOR_WIDTH_RATIO_MAX = 2.5  # a junction connector may flare at its mouth, but a
                                  # max/min width spread beyond this signals a geometry
@@ -219,9 +231,142 @@ def _length_limit(pts):
     (heading turns more than ``CURVE_TURN_DEG`` over any ``CURVE_WINDOW_M`` window),
     else ``MAX_LEN_STRAIGHT_M``. The single classifier shared by the splitter
     (``utils.split``) and the checker (``check_vm_01_24``) so they cannot diverge.
+
+    Whole-polyline verdict: used by the *checker* on each already-split piece
+    (which is single-class by construction — see ``_adaptive_cut_fractions``) and
+    as a coarse "does this way need splitting at all" gate.
     """
     curved = _curve_turn_over_window(pts, CURVE_WINDOW_M) > CURVE_TURN_DEG
     return MAX_LEN_CURVED_M if curved else MAX_LEN_STRAIGHT_M
+
+
+def _curve_mask(rs, thr=CURVE_TURN_DEG):
+    """Per-segment curved/straight mask for a resampled polyline ``rs``.
+
+    Segment ``i`` (between ``rs[i]`` and ``rs[i+1]``) is *curved* if it lies in
+    some arc-length window ≤ ``CURVE_WINDOW_M`` whose accumulated heading change
+    exceeds ``thr`` — the same "any window turns more than the threshold" test as
+    ``_curve_turn_over_window``, but resolved locally per segment instead of
+    collapsed to a single verdict for the whole way. This is what lets a straight
+    tail and a curved middle on one boundary get different split spacings.
+    """
+    n = len(rs) - 1
+    if n < 1:
+        return []
+    seg, heading = [], []
+    for i in range(n):
+        dx, dy = rs[i + 1][0] - rs[i][0], rs[i + 1][1] - rs[i][1]
+        d = math.hypot(dx, dy)
+        seg.append(d)
+        heading.append(math.atan2(dy, dx) if d > 0 else (heading[-1] if heading else 0.0))
+    # defl[k] = turn (deg) at the interior vertex joining segment k-1 and k
+    defl = [0.0] * n
+    for k in range(1, n):
+        a = heading[k] - heading[k - 1]
+        a = (a + math.pi) % (2 * math.pi) - math.pi
+        defl[k] = abs(math.degrees(a))
+    curved = [False] * n
+    for a in range(n):
+        length = run = 0.0
+        for b in range(a, n):
+            length += seg[b]
+            if b > a:
+                run += defl[b]
+            if length > CURVE_WINDOW_M:
+                break
+            if run > thr:
+                for t in range(a, b + 1):
+                    curved[t] = True
+                break
+    return curved
+
+
+def _dilate_mask(mask, seg, radius):
+    """Grow the True regions of a per-segment boolean ``mask`` outward by
+    ``radius`` arc-length (a 1-D distance transform along the chain). Used to widen
+    the curved zone so cut spacing is already tight on the *approach* to a curve —
+    otherwise a piece straddling the straight→curve transition can be both long and
+    curve-classified, which would fail the per-piece length check."""
+    n = len(mask)
+    if n == 0 or not any(mask):
+        return list(mask)
+    INF = float("inf")
+    d = [0.0 if m else INF for m in mask]
+    for i in range(1, n):                       # forward sweep
+        if d[i] > 0:
+            step = (seg[i - 1] + seg[i]) / 2.0
+            d[i] = min(d[i], d[i - 1] + step)
+    for i in range(n - 2, -1, -1):              # backward sweep
+        if d[i] > 0:
+            step = (seg[i] + seg[i + 1]) / 2.0
+            d[i] = min(d[i], d[i + 1] + step)
+    return [dist <= radius for dist in d]
+
+
+def _local_limits(pts):
+    """Resample ``pts`` and return ``(seg_lengths, per_seg_limit)`` where each
+    segment's limit is ``MAX_LEN_CURVED_M`` inside a curved stretch (see
+    ``_curve_mask``, widened by one window) and ``MAX_LEN_STRAIGHT_M`` on a
+    straight one."""
+    rs = _resample_polyline(pts, CURVE_RESAMPLE_STEP_M)
+    seg = [math.dist(rs[i], rs[i + 1]) for i in range(len(rs) - 1)]
+    curved = _dilate_mask(_curve_mask(rs, CURVE_TURN_DEG), seg, CURVE_WINDOW_M)
+    lim = [(MAX_LEN_CURVED_M if c else MAX_LEN_STRAIGHT_M) * SPLIT_LIMIT_RATIO
+           for c in curved]
+    return seg, lim
+
+
+def _combined_cut_fractions(polys, samples=400):
+    """Interior arc-length fractions to cut a whole *group* of boundaries at, in a
+    common [0, 1] parameter (fraction of each way's own length).
+
+    The group is a connected lane component — a lanelet's two boundaries plus every
+    way they transitively share. All are cut at the SAME fractions so the pieces
+    stay square and their shared cut cross-sections register as connected. The cut
+    density at parameter ``f`` is ``max`` over the group's ways of
+    ``length / local_limit(f)``: wherever *any* way in the group is long or curved,
+    the cuts there are tight enough for it, so every way's pieces land within their
+    own straight/curved limit — including a taper/merge where a bend sits at a
+    different fraction on each side. Equal *cumulative* density between cuts then
+    spaces them densely through curves and sparsely along straights.
+
+    Returns ``[]`` when the group needs no cut (combined weight ≤ 1)."""
+    profs = []
+    for pts in polys:
+        if len(pts) < 2:
+            continue
+        seg, lim = _local_limits(pts)
+        total = sum(seg)
+        if total <= 0:
+            continue
+        cum = [0.0]
+        for s in seg:
+            cum.append(cum[-1] + s)
+        samp, j = [], 0
+        for i in range(samples):
+            pos = ((i + 0.5) / samples) * total
+            while j < len(seg) - 1 and cum[j + 1] <= pos:
+                j += 1
+            samp.append(total / lim[j])          # pieces-per-unit-f this way demands
+        profs.append(samp)
+    if not profs:
+        return []
+    df = 1.0 / samples
+    dens = [max(p[i] for p in profs) for i in range(samples)]
+    W = sum(dens) * df
+    if W <= 1 + 1e-9:
+        return []
+    k = math.ceil(W - 1e-9)
+    fracs, ti, cw = [], 1, 0.0
+    for i in range(samples):
+        cw0 = cw
+        cw += dens[i] * df
+        while ti < k and cw >= W * ti / k - 1e-12:
+            wt = W * ti / k
+            t = (wt - cw0) / (cw - cw0) if cw > cw0 else 0.0
+            fracs.append((i + t) / samples)
+            ti += 1
+    return [f for f in fracs if 1e-6 < f < 1 - 1e-6]
 
 
 # --------------------------------------------------------------------------- #
@@ -587,30 +732,84 @@ def check_vm_01_21(m):
                        isolated, len(roads))
 
 
+def _splittable_lanelets(m):
+    """Replicate split.py's cuttability fixpoint.
+
+    A lanelet is exempt (never split) if it lacks a boundary or is a walkway /
+    crosswalk / intersection connector. Then, monotonically: a way is *cuttable*
+    only if every lanelet owning it is splittable, and a lanelet is splittable
+    only if both its ways are cuttable. This propagates un-cuttability through
+    shared boundaries (a road_shoulder sharing one way with an exempt walkway
+    cannot be split, which in turn pins the road it shares its other boundary
+    with). Returns (splittable: {ll_id: bool}, bounds: {ll_id: (left, right)}).
+    """
+    bounds = {}
+    exempt = {}
+    owners = defaultdict(list)
+    for ll in m.lanelets:
+        bw = m.lanelet_bound_ways(ll)
+        left, right = bw.get("left"), bw.get("right")
+        lid = id(ll)
+        bounds[lid] = (left, right)
+        t = _tags(ll)
+        exempt[lid] = (left is None or right is None
+                       or t.get("subtype") in ("crosswalk", "walkway")
+                       or "turn_direction" in t or "intersection_area" in t)
+        for wid in (left, right):
+            if wid is not None:
+                owners[wid].append(lid)
+    splittable = {lid: not exempt[lid] for lid in bounds}
+    changed = True
+    while changed:
+        changed = False
+        cuttable = {wid: all(splittable[o] for o in own) for wid, own in owners.items()}
+        for lid, (left, right) in bounds.items():
+            if exempt[lid]:
+                continue
+            ok = cuttable.get(left, False) and cuttable.get(right, False)
+            if splittable[lid] != ok:
+                splittable[lid] = ok
+                changed = True
+    return splittable, exempt, owners
+
+
 def check_vm_01_24(m):
     """Lanelet length: boundary ≤100 m straight / ≤20 m curved.
 
     Intersection lanelets are exempt (vm-03-05: a junction connector must stay
     continuous entrance→exit), identified by the S6 turn_direction /
-    intersection_area tags. Crosswalks are exempt (short by nature).
+    intersection_area tags. Crosswalks and walkways are exempt: Autoware imposes
+    no length limit on pedestrian lanelets and forbids splitting them (its
+    longitudinal_subtype_connection validator bans a walkway/crosswalk successor),
+    so split.py keeps them whole.
+
+    Only genuinely *cuttable* boundaries are graded: an over-length way that
+    split.py cannot cut without also splitting an exempt lanelet (a boundary
+    shared, directly or transitively, with a walkway/crosswalk/intersection) is
+    un-cuttable by design and reported separately, not as a failure.
     """
-    over = 0
-    total = 0
-    for ll in m.lanelets:
-        t = _tags(ll)
-        if t.get("subtype") == "crosswalk" or "turn_direction" in t or "intersection_area" in t:
+    splittable, exempt, owners = _splittable_lanelets(m)
+    cuttable = {wid: all(splittable[o] for o in own) for wid, own in owners.items()}
+    over = uncuttable = total = 0
+    for wid, own in owners.items():
+        if all(exempt[o] for o in own):
+            continue                       # pedestrian/junction boundary — not length-graded
+        pts = m.way_polyline(wid)
+        if len(pts) < 2:
             continue
-        for wid in m.lanelet_bound_ways(ll).values():
-            pts = m.way_polyline(wid)
-            if len(pts) < 2:
-                continue
-            total += 1
-            if _polyline_len(pts) > _length_limit(pts):
+        total += 1
+        if _polyline_len(pts) > _length_limit(pts):
+            if cuttable.get(wid, False):
                 over += 1
+            else:
+                uncuttable += 1
     if total == 0:
         return CheckResult("vm-01-24", "Lanelet splitting", SKIP, "no lanelet boundaries")
+    detail = "cuttable boundaries over length limit"
+    if uncuttable:
+        detail += f" ({uncuttable} more un-cuttable, shared with exempt lanelets)"
     return CheckResult("vm-01-24", "Lanelet splitting", PASS if over == 0 else FAIL,
-                       f"boundaries over length limit", over, total)
+                       detail, over, total)
 
 
 def check_vm_03_01(m):

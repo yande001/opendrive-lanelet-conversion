@@ -1,10 +1,18 @@
 """Length-based lanelet splitting (vm-01-24).
 
 Split over-length lanelets into ≤100 m (straight) / ≤20 m (curved) pieces by
-cutting their boundary ways at equal arc-length fractions and reassembling the
-lanelet relations. Runs on the **pre-downsample** OSM tree, where the geometry
-is dense and arc length is accurate; downsampling afterwards only removes
-interior nodes, so pieces stay within the limit.
+cutting their boundary ways and reassembling the lanelet relations. Runs *after*
+downsampling (convert.py), on the same ``local_x``/``local_y`` geometry the
+validator grades, so the splitter and checker never disagree about a piece.
+
+Cut placement is **adaptive and curvature-aware**: a boundary that is straight,
+then curved, then straight keeps ~100 m straight pieces while its curved middle is
+cut at ~20 m, rather than being forced wholesale to the strict curved limit. The
+cut positions of a whole connected lane group (a lanelet's two boundaries plus
+every way they transitively share) are chosen *together* by
+``_combined_cut_fractions`` so the group is cut at one common set of fractions —
+tight through anyone's curve, aligned across the group. See that helper for why
+this keeps every piece within its own limit while the pieces stay square.
 
 Invariants preserved (the things S4/S6 established):
 
@@ -30,9 +38,12 @@ from collections import defaultdict
 from lxml import etree
 
 from utils.validate import (
-    _polyline_len,
-    _length_limit,
+    _combined_cut_fractions,
 )
+
+
+def _way_polyline(way_refs, node_xy, wid):
+    return [node_xy[r] for r in way_refs[wid] if r in node_xy]
 
 SNAP_M = 0.1  # a cut landing within this of an existing node reuses that node
 
@@ -101,17 +112,85 @@ def split_long_lanelets(osm_root):
             lanelets.append({"elem": r, "id": r.get("id"), "left": left,
                              "right": right, "tags": t, "regmembers": regmembers})
 
+    # ---- id allocation ---------------------------------------------------- #
+    max_id = 0
+    for elem in osm_root.iter():
+        if elem.tag in ("node", "way", "relation"):
+            try:
+                max_id = max(max_id, int(elem.get("id")))
+            except (TypeError, ValueError):
+                pass
+    counter = [max_id + 1]
+
+    def next_id():
+        counter[0] += 1
+        return str(counter[0])
+
+    # ---- decouple pedestrian / carriageway shared boundaries ------------- #
+    # A walkway/crosswalk must not be split — Autoware's
+    # longitudinal_subtype_connection validator forbids a walkway/crosswalk from
+    # having a successor, and cutting one longitudinally creates exactly that.
+    # But a sidewalk usually shares one boundary *way* with the adjacent
+    # road_shoulder/road, so refusing to cut that way would cascade
+    # non-splittability across the whole carriageway (sidewalks are everywhere;
+    # on TownBig this pinned 99% of the map). Instead give the road side its own
+    # coincident copy of the shared boundary — it can be cut freely while the
+    # walkway keeps its copy whole. Endpoints stay shared; only interior cut
+    # nodes diverge. road↔shoulder sharing (vm-01-16) is untouched: that boundary
+    # has no pedestrian owner, so it is never decoupled.
+    def _pedestrian(ll):
+        return ll["tags"].get("subtype") in ("walkway", "crosswalk")
+
+    prelim_owners = defaultdict(list)
+    for ll in lanelets:
+        prelim_owners[ll["left"]].append(ll)
+        prelim_owners[ll["right"]].append(ll)
+
+    n_decoupled = 0
+    for wid in list(ways):
+        own = prelim_owners.get(wid, [])
+        ped = [ll for ll in own if _pedestrian(ll)]
+        non = [ll for ll in own if not _pedestrian(ll)]
+        if not ped or not non:
+            continue
+        dup_id = next_id()
+        dup = etree.Element("way", id=dup_id, action="modify", visible="true", version="1")
+        for ref in way_refs[wid]:
+            dup.append(etree.Element("nd", ref=ref))
+        for k_, v_ in way_tags[wid].items():
+            dup.append(etree.Element("tag", k=k_, v=v_))
+        osm_root.append(dup)
+        ways[dup_id] = dup
+        way_refs[dup_id] = list(way_refs[wid])
+        way_tags[dup_id] = dict(way_tags[wid])
+        # repoint the non-pedestrian owners (they keep sharing the copy amongst
+        # themselves); the pedestrian owners keep the original whole way.
+        for ll in non:
+            for side in ("left", "right"):
+                if ll[side] == wid:
+                    ll[side] = dup_id
+            for mem in ll["elem"].findall("member"):
+                if (mem.get("type") == "way" and mem.get("ref") == wid
+                        and mem.get("role") in ("left", "right")):
+                    mem.set("ref", dup_id)
+        n_decoupled += 1
+
     # ---- exemption -------------------------------------------------------- #
-    # Intersection connectors (vm-03-05) and crosswalks stay whole. Lanelets
-    # referenced by a right_of_way reg-elem are NOT exempt: pinning them would
-    # cascade non-splittability through their shared boundaries to the long road
+    # Intersection connectors (vm-03-05) and crosswalks/walkways stay whole.
+    # Walkways and crosswalks must not be split: Autoware's
+    # longitudinal_subtype_connection validator forbids a walkway/crosswalk
+    # lanelet from having a successor, and splitting one into pieces creates
+    # exactly such successor links. There is also no length limit on pedestrian
+    # lanelets (vm-01-24 targets vehicle lanes). Lanelets referenced by a
+    # right_of_way reg-elem are NOT exempt: pinning them would cascade
+    # non-splittability through their shared boundaries to the long road
     # lanelets of the same approach. Instead the reg-elem's member refs are
     # remapped to the junction-end piece after splitting (see below).
     #
     def exempt(ll):
         t = ll["tags"]
         return (ll["left"] is None or ll["right"] is None
-                or t.get("subtype") == "crosswalk"
+                or t.get("subtype") in ("crosswalk", "walkway")
                 or "turn_direction" in t or "intersection_area" in t)
 
     is_exempt = {ll["id"]: exempt(ll) for ll in lanelets}
@@ -120,17 +199,6 @@ def split_long_lanelets(osm_root):
     for ll in lanelets:
         owners[ll["left"]].append(ll)
         owners[ll["right"]].append(ll)
-
-    # ---- per-way length need --------------------------------------------- #
-    def way_need(wid):
-        pts = [node_xy[r] for r in way_refs[wid] if r in node_xy]
-        if len(pts) < 2:
-            return 1
-        length = _polyline_len(pts)
-        limit = _length_limit(pts)
-        return math.ceil(length / limit) if length > limit + 1e-9 else 1
-
-    base_need = {wid: way_need(wid) for wid in ways}
 
     # ---- fixpoint 1: which lanelets are splittable ----------------------- #
     # A way is cuttable only if every owner is splittable; a lanelet is
@@ -151,34 +219,52 @@ def split_long_lanelets(osm_root):
 
     sp = [ll for ll in lanelets if splittable[ll["id"]]]
 
-    # ---- fixpoint 2: cut count per way (consistent across a lanelet & shares)
-    way_cut = {wid: 1 for wid in ways}
+    # ---- cut fractions, shared across each connected way-group ------------ #
+    # Group the cuttable boundary ways into connected components: a lanelet links
+    # its own left+right, and a shared way links the lanelets on either side, so a
+    # component is one lateral lane group. Every way in a component is cut at ONE
+    # set of arc-length fractions (see _combined_cut_fractions), whose density is
+    # the max over the component's ways of length/local-limit. That makes the cuts:
+    #   * within-limit for *every* way (each piece ≤ its own straight/curved limit),
+    #   * aligned (same fractions ⇒ square pieces whose shared cut cross-sections
+    #     register as connected — vm-01-21), and
+    #   * consistent for a shared way (one component ⇒ one fraction set).
+    # A curve that sits at different fractions on a lanelet's two boundaries (a
+    # taper/merge, where the sides differ in length) is handled because the density
+    # is taken over both — neither side's bend is left uncut.
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for ll in sp:
+        union(ll["left"], ll["right"])
+
+    comp_ways = defaultdict(list)
     for ll in sp:
         for wid in (ll["left"], ll["right"]):
-            way_cut[wid] = max(way_cut[wid], base_need[wid])
-    changed = True
-    while changed:
-        changed = False
-        for ll in sp:
-            k = max(way_cut[ll["left"]], way_cut[ll["right"]])
-            for wid in (ll["left"], ll["right"]):
-                if way_cut[wid] < k:
-                    way_cut[wid] = k
-                    changed = True
+            comp_ways[find(wid)].append(wid)
 
-    # ---- id allocation ---------------------------------------------------- #
-    max_id = 0
-    for elem in osm_root.iter():
-        if elem.tag in ("node", "way", "relation"):
-            try:
-                max_id = max(max_id, int(elem.get("id")))
-            except (TypeError, ValueError):
-                pass
-    counter = [max_id + 1]
-
-    def next_id():
-        counter[0] += 1
-        return str(counter[0])
+    way_frac = {}
+    for wids in comp_ways.values():
+        wids = list(dict.fromkeys(wids))          # de-dup, keep order
+        polys = [_way_polyline(way_refs, node_xy, wid) for wid in wids]
+        fr = _combined_cut_fractions(polys)
+        if not fr:
+            continue
+        for wid in wids:
+            way_frac[wid] = fr
 
     def make_node(a_ref, b_ref, t):
         """Interpolate a new node at fraction t between a_ref and b_ref."""
@@ -205,15 +291,14 @@ def split_long_lanelets(osm_root):
         node_xy[nid] = _node_metric(node)
         return nid
 
-    # ---- cut the ways ----------------------------------------------------- #
-    def cut_way(wid, k):
+    def cut_way(wid, fracs):
         refs = way_refs[wid]
         pts = [node_xy[r] for r in refs]
         seglen = [math.dist(pts[i], pts[i + 1]) for i in range(len(refs) - 1)]
         total = sum(seglen)
         if total <= 0:
             return None
-        targets = [total * i / k for i in range(1, k)]
+        targets = [total * f for f in fracs]
         pieces = []
         cur = [refs[0]]
         acc = 0.0
@@ -242,7 +327,7 @@ def split_long_lanelets(osm_root):
             acc = end
         if len(cur) >= 2:
             pieces.append(cur)
-        if len(pieces) != k:
+        if len(pieces) != len(fracs) + 1:
             return None  # snapping degenerated; leave this way whole
         # materialise piece ways (copy the original way's tags)
         piece_ids = []
@@ -259,8 +344,8 @@ def split_long_lanelets(osm_root):
 
     way_pieces = {}
     for wid in list(ways):
-        if way_cut[wid] > 1:
-            pid_list = cut_way(wid, way_cut[wid])
+        if wid in way_frac:
+            pid_list = cut_way(wid, way_frac[wid])
             if pid_list is not None:
                 way_pieces[wid] = pid_list
 
@@ -330,4 +415,4 @@ def split_long_lanelets(osm_root):
         osm_root.remove(ways[wid])
 
     return {"lanelets_split": n_split, "pieces_created": n_new,
-            "ways_cut": len(way_pieces)}
+            "ways_cut": len(way_pieces), "boundaries_decoupled": n_decoupled}
