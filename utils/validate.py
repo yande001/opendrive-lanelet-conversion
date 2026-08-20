@@ -30,15 +30,16 @@ PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 MAX_LEN_STRAIGHT_M = 100.0
 MAX_LEN_CURVED_M = 20.0
 CURVE_WINDOW_M = MAX_LEN_CURVED_M   # arc-length window over which curvature is measured
-CURVE_TURN_DEG = 8.0           # if the heading turns more than this over any
+CURVE_TURN_DEG = 4.0           # if the heading turns more than this over any
                                # CURVE_WINDOW_M-long window the polyline is "curved"
-                               # (≈143 m radius: turn°/window ≈ 1146/R, so 8°/20 m ⇒
-                               # R≈143 m). Chosen so a 100 m-radius bend (~11.5°/20 m)
-                               # counts as curved while a 200 m-radius one (~6°) stays
-                               # straight — the midpoint of those two separates them
-                               # robustly. Measured as *accumulated* turning, not a
-                               # single-vertex angle, so a smoothly-sampled bend that
-                               # turns tens of degrees is detected (vm-01-24).
+                               # and split to ≤MAX_LEN_CURVED_M. turn°/window ≈ 1146/R,
+                               # so 4°/20 m ⇒ curves down to ≈290 m radius are split
+                               # finely. Chosen so a 200 m-radius bend (~6°/20 m) counts
+                               # as curved — at 100 m straight pieces its chord deviates
+                               # ~6 m from the arc, so it must be split. Measured as
+                               # *accumulated* turning, not a single-vertex angle, so a
+                               # smoothly-sampled bend that turns tens of degrees over the
+                               # window is detected (vm-01-24).
 SPLIT_LIMIT_RATIO = 0.9        # the splitter aims for pieces at this fraction of the
                                # graded limit (≈18 m curved / 90 m straight). A lanelet's
                                # left and right are cut at the *same* fractions to keep
@@ -704,6 +705,14 @@ def check_vm_01_21(m):
     *both* end cross-sections are unshared is fully isolated → unroutable. One open
     end is allowed (map boundary) and reported as info. Cross-sections are matched
     against all lanelets, so a road linking to a junction/shoulder counts.
+
+    A cross-section counts as shared either by an exact end-pair match, or — the
+    robust fallback — when both of its nodes are boundary endpoints of one other
+    lanelet. The fallback recognises a neighbour that shares the two cut nodes but
+    whose own left/right 2×2 pairing came out flipped (a short, finely-split piece),
+    which the exact match would miss and wrongly report as isolated. Lateral
+    neighbours can never trigger it: they share only one cross-section node, never
+    both.
     """
     def _real(ll):  # ignore degenerate sub-metre stub lanelets (geometry artifacts)
         bw = m.lanelet_bound_ways(ll)
@@ -715,16 +724,47 @@ def check_vm_01_21(m):
         return CheckResult("vm-01-21", "Forward/backward connectivity", SKIP,
                            "no road lanelets")
     cross = defaultdict(int)
+    ep_owners = defaultdict(set)   # boundary-endpoint node -> {lanelet identities}
     for ll in m.lanelets:
         for c in _lanelet_cross_sections(m, ll):
             cross[c] += 1
+        bw = m.lanelet_bound_ways(ll)
+        for s in ("left", "right"):
+            refs = m.way_nodes.get(bw.get(s), [])
+            if len(refs) >= 2:
+                ep_owners[refs[0]].add(id(ll))
+                ep_owners[refs[-1]].add(id(ll))
+
+    def _cross_pairs(ll):
+        """Every {left-end, right-end} node pair of ``ll`` — the four
+        left×right endpoint combinations. Two of them are the real cross-sections;
+        which two depends on boundary orientation, so testing all four makes the
+        connectivity verdict independent of a per-piece 2×2 pairing that can flip on
+        short/skewed splits. Same-boundary pairs are excluded: those are shared by a
+        *lateral* neighbour and would mask a real longitudinal dead-end."""
+        bw = m.lanelet_bound_ways(ll)
+        ln = m.way_nodes.get(bw.get("left"), [])
+        rn = m.way_nodes.get(bw.get("right"), [])
+        if len(ln) < 2 or len(rn) < 2:
+            return []
+        return [(l, r) for l in {ln[0], ln[-1]} for r in {rn[0], rn[-1]} if l != r]
+
+    def _shared_ends(ll):
+        """How many of ``ll``'s ends connect to another lanelet (0/1/2). A left×right
+        pair shared with one other lanelet is a real succ/pred cross-section."""
+        pairs = _cross_pairs(ll)
+        n = 0
+        for a, b in pairs:
+            if (ep_owners.get(a, set()) & ep_owners.get(b, set())) - {id(ll)}:
+                n += 1
+        return min(n, 2)      # at most two genuine ends
+
     isolated = dead_end = 0
     for ll in roads:
-        cs = _lanelet_cross_sections(m, ll)
-        shared = sum(1 for c in cs if cross[c] > 1)
+        shared = _shared_ends(ll)
         if shared == 0:
             isolated += 1
-        elif shared < len(cs):
+        elif shared < 2:
             dead_end += 1
     status = PASS if isolated == 0 else FAIL
     return CheckResult("vm-01-21", "Forward/backward connectivity", status,
