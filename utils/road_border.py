@@ -23,9 +23,9 @@ lanes** — i.e. an outer edge or a boundary with a non-``road`` neighbour
 (shoulder / walkway). Those get ``type:road_border`` + ``lane_change:no`` (you
 cannot lane-change across the edge of the drivable area).
 
-Two cases are left untyped **by policy** because they are crossable dividers
-between two ``subtype:road`` lanelets, where synthesising ``road_border`` would
-wrongly forbid a legal lane change:
+Two cases are left as-is **by policy** (untyped stays untyped, painted keeps its
+marking) because they are crossable dividers between two ``subtype:road``
+lanelets, where forcing ``road_border`` would wrongly forbid a legal lane change:
 
 * the divider is one shared way (referenced by two road lanelets); and
 * the divider is *coincident but unmerged* — two opposing road lanelets each
@@ -33,15 +33,31 @@ wrongly forbid a legal lane change:
   so each looks like an outer edge by reference count alone. A true outer edge
   has no boundary way coincident with it, so coincidence is the discriminator.
 
-Painted edges (already ``line_thin``/``line_thick``) are never touched. Runs as
-a post-process on the OSM tree, after splitting, so every final boundary-way
-piece is classified.
+A physical road edge is a ``road_border`` **whatever roadMark the source
+painted on it**. odr2cr derives ``type`` from the OpenDRIVE ``roadMark`` — but
+that describes the *paint* (``solid``->``line_thin``), a different axis from the
+LL2 ``type`` which describes the boundary's *physical function*. Many sources
+(the vision-pilot UC-PLN set among them) author a ``solid`` edge line on every
+outer road edge, so odr2cr emits ``line_thin`` there and the physical
+``road_border`` is lost. So a painted ``line_thin``/``line_thick`` outer edge is
+**reclassified** to ``road_border`` (its ``subtype`` dropped); only interior
+dividers — which the same topology exempts — keep their painted marking. An
+already-physical border type (``road_border``/``curbstone``/``guard_rail``/…) is
+left untouched.
+
+Runs as a post-process on the OSM tree, after splitting, so every final
+boundary-way piece is classified.
 """
 from collections import defaultdict
 
 from lxml import etree
 
 DRIVABLE_SUBTYPES = {"road", "road_shoulder"}   # a road_border edges the carriageway
+# Physical-border types already correct — never reclassify these.
+PHYSICAL_BORDER_TYPES = {"road_border", "curbstone", "guard_rail", "wall", "fence"}
+# Painted lane markings — reclassified to road_border when the topology says the
+# way is an outer road edge rather than a crossable interior divider.
+PAINTED_TYPES = {"line_thin", "line_thick"}
 COINCIDENT_TOL_M = 0.50    # boundary ways within this trace the same physical line
                            # (matches vm-01-04's coincidence tol so no unmerged
                            # opposing centerline is mistagged as an outer edge)
@@ -116,8 +132,33 @@ def _coincident_boundary_ways(ways, boundary_ids, xy):
     return hit
 
 
+def _set_road_border(way):
+    """Make ``way`` a ``road_border`` in-place (drop painted subtype, set lane_change:no).
+
+    Works for both an untyped way (adds the tags) and a painted
+    ``line_thin``/``line_thick`` way (rewrites ``type``, removes the marking
+    ``subtype`` which ``road_border`` does not carry).
+    """
+    have = {}
+    for t in way.findall("tag"):
+        have[t.get("k")] = t
+    if "subtype" in have:                       # road_border carries no subtype
+        way.remove(have.pop("subtype"))
+    if "type" in have:
+        have["type"].set("v", "road_border")
+    else:
+        etree.SubElement(way, "tag", k="type", v="road_border")
+    if "lane_change" in have:
+        have["lane_change"].set("v", "no")
+    else:
+        etree.SubElement(way, "tag", k="lane_change", v="no")
+
+
 def add_road_borders(osm_root):
-    """Tag unmarked road-edge boundary ways in-place. Returns a stats dict."""
+    """Tag/reclassify road-edge boundary ways as ``road_border`` in-place.
+
+    Returns a stats dict.
+    """
     ways = {w.get("id"): w for w in osm_root.findall("way")}
 
     # boundary way id -> subtypes of the lanelets that reference it (left/right)
@@ -134,24 +175,31 @@ def add_road_borders(osm_root):
     xy = _node_xy(osm_root)
     coincident = _coincident_boundary_ways(ways, list(refs), xy)
 
-    tagged = 0
+    tagged = added = reclassified = 0
     for wid, subtypes in refs.items():
         way = ways.get(wid)
         if way is None:
             continue
-        if _tag_map(way).get("type") is not None:
-            continue        # already typed (painted line or existing curb)
+        existing = _tag_map(way).get("type")
+        if existing in PHYSICAL_BORDER_TYPES:
+            continue        # already a physical border (existing curb / prior border)
+        if existing is not None and existing not in PAINTED_TYPES:
+            continue        # some other typed line we don't reclassify
         # only the edge of the carriageway is a road_border (skip sidewalk/crosswalk)
         if not any(s in DRIVABLE_SUBTYPES for s in subtypes):
             continue
-        # crossable unmarked divider between two travel lanes -> leave untyped
+        # crossable divider between two travel lanes -> keep as-is (painted or untyped)
         if len(subtypes) >= 2 and all(s == "road" for s in subtypes):
             continue
         # coincident-but-unmerged opposing centerline masquerading as an outer edge
         if wid in coincident:
             continue
-        etree.SubElement(way, "tag", k="type", v="road_border")
-        etree.SubElement(way, "tag", k="lane_change", v="no")
+        _set_road_border(way)
         tagged += 1
+        if existing in PAINTED_TYPES:
+            reclassified += 1
+        else:
+            added += 1
 
-    return {"borders_tagged": tagged, "coincident_skipped": len(coincident)}
+    return {"borders_tagged": tagged, "borders_added": added,
+            "borders_reclassified": reclassified, "coincident_skipped": len(coincident)}

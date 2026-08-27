@@ -324,13 +324,16 @@ def main():
                   f"{stats['pieces_created']} pieces ({stats['ways_cut']} ways cut, "
                   f"{stats['boundaries_decoupled']} walkway boundaries decoupled)")
 
-    # Tag unmarked physical road edges as road_border (vm-01-02). Runs last so
-    # every final boundary-way piece (post-split) is classified. Interior unmarked
-    # dividers between two road lanes are left untyped by policy.
+    # Tag physical road edges as road_border (vm-01-02) — both unmarked edges and
+    # painted (line_thin/line_thick) outer edges, which describe paint, not the
+    # boundary's physical function. Runs last so every final boundary-way piece
+    # (post-split) is classified. Interior dividers between two road lanes keep
+    # their marking (or stay untyped) by policy.
     if not args.no_road_border:
         bstats = add_road_borders(osm)
-        print(f"Road borders:   tagged {bstats['borders_tagged']} unmarked edges "
-              f"as road_border")
+        print(f"Road borders:   tagged {bstats['borders_tagged']} road edges as "
+              f"road_border ({bstats['borders_added']} unmarked, "
+              f"{bstats['borders_reclassified']} reclassified from painted)")
 
     write_osm(osm, output_path)
     print(f"Output:         {output_path}")
