@@ -1197,22 +1197,45 @@ def check_vm_04_01(m):
 
 
 def check_vm_05_01(m):
-    """Crosswalk basics: crosswalk lanelet + crosswalk_polygon + crosswalk reg-elem."""
+    """Crosswalk basics: crosswalk_polygon + a crosswalk reg-elem that `refers` to
+    every crosswalk lanelet, and each such lanelet carries `participant:pedestrian`.
+
+    Mirrors the official validators (`mapping.crosswalk.missing_regulatory_elements`
+    + `regulatory_element_details`): a crosswalk lanelet with no reg-elem referring
+    to it, or one whose `refers` lanelet lacks `participant:pedestrian` (yes/true),
+    is NG. A stop line (`ref_line`) is informational, not required.
+    """
     cw_lanelets = [ll for ll in m.lanelets if _tags(ll).get("subtype") == "crosswalk"]
     if not cw_lanelets:
         return CheckResult("vm-05-01", "Crosswalk basics", SKIP, "no crosswalks in source")
     cw_poly = [wid for wid, t in m.way_tags.items() if t.get("type") == "crosswalk_polygon"]
     cw_regelems = [r for r in m.regelems if _tags(r).get("subtype") == "crosswalk"]
+    # crosswalk lanelet relation ids that a crosswalk reg-elem refers to
+    referred = set()
+    for r in cw_regelems:
+        for mem in r.findall("member"):
+            if mem.get("role") == "refers":
+                referred.add(mem.get("ref"))
+
+    def _ped(t):
+        return str(t.get("participant:pedestrian", "")).lower() in ("yes", "true", "1")
+
+    unreferred = sum(1 for ll in cw_lanelets if ll.get("id") not in referred)
+    no_ped = sum(1 for ll in cw_lanelets if not _ped(_tags(ll)))
     missing = []
     if not cw_poly:
         missing.append("crosswalk_polygon")
     if not cw_regelems:
         missing.append("crosswalk reg-elem")
+    if unreferred:
+        missing.append(f"{unreferred} lanelets not referred by a reg-elem")
+    if no_ped:
+        missing.append(f"{no_ped} lanelets missing participant:pedestrian")
     status = PASS if not missing else FAIL
-    detail = "complete" if not missing else "missing " + ", ".join(missing)
+    detail = "complete" if not missing else "missing " + "; ".join(missing)
     return CheckResult("vm-05-01", "Crosswalk basics", status,
                        f"{len(cw_lanelets)} crosswalk lanelets; {detail}",
-                       len(missing), 3)
+                       len(missing), len(cw_lanelets))
 
 
 def _sample_n(pts, n):
