@@ -135,7 +135,10 @@ def _simplify_way(points, angle_thrsh, min_dist):
 # Ways whose nodes are point features, not lane geometry: never simplify them
 # (their nodes carry meaning — e.g. a light_bulbs node's color — and may be
 # coincident in 2D, which the simplifier would collapse).
-_FEATURE_WAY_TYPES = {"light_bulbs"}
+# Area polygons (crosswalk_polygon, intersection_area) are also exempt: every
+# corner is meaningful, and the min_dist rule would otherwise drop a corner of a
+# narrow quad — a crosswalk_polygon under min_dist wide collapses to a triangle.
+_FEATURE_WAY_TYPES = {"light_bulbs", "crosswalk_polygon", "intersection_area"}
 # Node tags to carry through the node rebuild (beyond local_x/local_y/ele).
 _PRESERVED_NODE_TAGS = ("color", "arrow")
 

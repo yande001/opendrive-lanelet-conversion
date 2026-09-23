@@ -1203,13 +1203,28 @@ def check_vm_05_01(m):
     Mirrors the official validators (`mapping.crosswalk.missing_regulatory_elements`
     + `regulatory_element_details`): a crosswalk lanelet with no reg-elem referring
     to it, or one whose `refers` lanelet lacks `participant:pedestrian` (yes/true),
-    is NG. A stop line (`ref_line`) is informational, not required.
+    is NG. A stop line (`ref_line`) is informational, not required. Also guards a
+    geometry defect the official validator does not: a crosswalk_polygon whose
+    corners collapsed to fewer than 4 distinct points (a triangle).
     """
     cw_lanelets = [ll for ll in m.lanelets if _tags(ll).get("subtype") == "crosswalk"]
     if not cw_lanelets:
         return CheckResult("vm-05-01", "Crosswalk basics", SKIP, "no crosswalks in source")
     cw_poly = [wid for wid, t in m.way_tags.items() if t.get("type") == "crosswalk_polygon"]
     cw_regelems = [r for r in m.regelems if _tags(r).get("subtype") == "crosswalk"]
+
+    # A crosswalk_polygon must keep ≥4 distinct corners; if node simplification
+    # drops a corner of a narrow quad it collapses to a triangle (silent geometry bug).
+    def _distinct_corners(wid):
+        pts = m.way_polyline(wid)
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        uniq = []
+        for p in pts:
+            if not any(math.dist(p, q) < 1e-3 for q in uniq):
+                uniq.append(p)
+        return len(uniq)
+    degenerate = sum(1 for wid in cw_poly if _distinct_corners(wid) < 4)
     # crosswalk lanelet relation ids that a crosswalk reg-elem refers to
     referred = set()
     for r in cw_regelems:
@@ -1231,6 +1246,8 @@ def check_vm_05_01(m):
         missing.append(f"{unreferred} lanelets not referred by a reg-elem")
     if no_ped:
         missing.append(f"{no_ped} lanelets missing participant:pedestrian")
+    if degenerate:
+        missing.append(f"{degenerate} polygons collapsed to <4 corners")
     status = PASS if not missing else FAIL
     detail = "complete" if not missing else "missing " + "; ".join(missing)
     return CheckResult("vm-05-01", "Crosswalk basics", status,
