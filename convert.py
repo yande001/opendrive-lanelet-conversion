@@ -40,6 +40,7 @@ from utils.autoware_config import DEFAULT_CONFIG_PATH, apply_autoware_config
 from utils.split import split_long_lanelets
 from utils.dedup import dedup_lanelets
 from utils.road_border import add_road_borders
+from utils.boundary_repair import repair_teleported_endpoints
 
 # --- Constants ---
 PROJ_DEG = "EPSG:4326"
@@ -237,6 +238,8 @@ def main():
                         help="Skip length-based lanelet splitting (vm-01-24)")
     parser.add_argument("--no-dedup", action="store_true",
                         help="Skip duplicate-lanelet removal (vm-07-08)")
+    parser.add_argument("--no-boundary-repair", action="store_true",
+                        help="Skip trimming teleported sidewalk/shoulder boundary endpoints")
     parser.add_argument("--no-road-border", action="store_true",
                         help="Skip road_border tagging of unmarked road edges (vm-01-02)")
     parser.add_argument("--no-autoware", action="store_true",
@@ -303,6 +306,14 @@ def main():
     mapping_path = output_path.with_name(f"id_mapping_{stem}.csv")
     write_id_mapping(converter, mapping_path)
     print(f"ID mapping:     {mapping_path} ({len(converter.odr_to_l2_mapping)} entries)")
+
+    # Trim teleported endpoint nodes from sidewalk/shoulder boundaries (odr2cr snaps
+    # a connecting node onto a far lanelet, drawing long stray "jumping" lines). Runs
+    # pre-downsample where the raw sub-metre sampling makes the teleport unambiguous.
+    if not args.no_boundary_repair:
+        rstats = repair_teleported_endpoints(osm)
+        print(f"Boundary repair:trimmed {rstats['endpoints_dropped']} teleported "
+              f"endpoints on {rstats['ways_trimmed']} sidewalk/shoulder boundaries")
 
     # Remove duplicate lanelet relations (vm-07-08). Independent of downsampling —
     # odr2cr emits identical relations (e.g. junction-mouth approach stubs) that
