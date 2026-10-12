@@ -14,5 +14,7 @@
 -e ./extern/commonroad-scenario-designer
 
 lxml
+mgrs
 pyproj
 pyyaml
+shapely

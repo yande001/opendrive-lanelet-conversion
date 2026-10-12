@@ -12,6 +12,7 @@ and topology fixes, layered on a pinned fork of crdesigner.
 ## Layout
 
 - `convert.py` — single-file OpenDRIVE → Lanelet2 CLI
+- `convert_l2.py` — single-file Lanelet2 → OpenDRIVE CLI (reverse direction, CARLA); `validate_xodr.py`, `roundtrip_xodr.py` — its checks
 - `demo_evan.py` — batch conversion over `sample_data/`
 - `utils/` — geometry, postprocessing, config, and the `validate.py` requirement checker
 - `sample_data/` — input `.xodr` maps; `output/` — generated `.osm` (gitignored)
@@ -44,6 +45,31 @@ uv run --python olconversion/bin/python -c \
 `requirements.lock` pins every package (including crdesigner via the submodule), so
 a fresh install resolves identical versions. Do **not** `pip install
 commonroad-scenario-designer` from PyPI — that release lacks the autoware_dev changes.
+
+## Lanelet2 → OpenDRIVE (reverse direction)
+
+`convert_l2.py` converts an Autoware Lanelet2 map to OpenDRIVE 1.6 for CARLA, using the
+same pinned crdesigner fork (its `lanelet2cr` / `cr2odr` paths carry fork patches, so the
+PyPI release will not work here either).
+
+```bash
+# input dir with lanelet2_map.osm + map_projector_info.yaml (Autoware layout)
+uv run --python olconversion/bin/python convert_l2.py ~/Downloads/r01/lanelet2_map.osm
+#   -> output/r01.xodr + id_mapping_r01.csv, proj_info_r01.yaml, map_origin_r01.yaml,
+#      roundtrip_r01.{png,json}
+
+# structural checks / round-trip fidelity on their own
+uv run --python olconversion/bin/python validate_xodr.py output/r01.xodr
+uv run --python olconversion/bin/python roundtrip_xodr.py ~/Downloads/r01/lanelet2_map.osm output/r01.xodr --proj-info output/proj_info_r01.yaml
+```
+
+Options: `--frame local` (default: map-centred coordinates near the origin, geoReference
+with `lat_0/lon_0` for CARLA GNSS) or `--frame mgrs` (x/y identical to Autoware
+`local_x/local_y`); `--proj` / `--projector-info` to override the projection;
+`--plan-view`, `--no-piecewise-width`, `--no-resample`, `--no-merge-junctions`,
+`--no-sanitize-adjacency`, `--no-strip-z`, `--no-validate`, `--no-roundtrip`, `--keep-cr`.
+Design notes: `docs/arch/l2_to_odr.md`; full procedure (setup, stages, acceptance, CARLA
+import, fork workflow, troubleshooting): `docs/l2_to_odr_procedure.md`.
 
 ## Working on crdesigner
 
