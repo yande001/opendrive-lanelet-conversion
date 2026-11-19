@@ -46,6 +46,32 @@ uv run --python olconversion/bin/python -c \
 a fresh install resolves identical versions. Do **not** `pip install
 commonroad-scenario-designer` from PyPI — that release lacks the autoware_dev changes.
 
+## OpenDRIVE → Lanelet2 ID mapping
+
+`convert.py` writes `id_mapping_<stem>.csv` next to the output map:
+
+```
+opendrive_road_id,opendrive_lane_id,opendrive_s_min,opendrive_s_max,opendrive_direction,lanelet2_relation_id
+2062,-1,0.0000,85.6534,1,1019458
+```
+
+`s_min <= s <= s_max` is the lanelet's interval on the road reference line (a scenario
+position is road `s`, independent of lane travel direction); `direction` is `1` when the
+lanelet runs with `+s` and `-1` against it (from the lane sign, right-hand traffic).
+To get the lanelet-local `s` use the lanelet's own `centerline().length()`:
+
+```
+frac = (s - s_min) / (s_max - s_min)
+if direction == -1: frac = 1 - frac
+lanelet_local_s = frac * lanelet_centerline_length
+```
+
+Section bounds are exact (from the parser); pieces of a split lane section are ordered by
+shared node identity and subdivided by 2D arc-length fraction, which is approximate inside a
+section on bends. Roads with `singleSide` sections and groups whose pieces do not form one
+chain are skipped and counted in the `ID mapping:` line. With `--concat` one lanelet spans
+several sections but its tag names only the first, so rows are chain-broken or divergent.
+
 ## Lanelet2 → OpenDRIVE (reverse direction)
 
 `convert_l2.py` converts an Autoware Lanelet2 map to OpenDRIVE 1.6 for CARLA, using the

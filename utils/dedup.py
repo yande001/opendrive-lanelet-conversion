@@ -19,8 +19,17 @@ def _tag_map(elem):
     return {t.get("k"): t.get("v") for t in elem.findall("tag")}
 
 
+# Tags that record *which OpenDRIVE lane* a lanelet came from. They differ between
+# otherwise-coincident lanelets of different lanes, so including them in the
+# equality key would stop genuine duplicates from merging. The survivor keeps its
+# own value; removed duplicates just lose their ID-mapping row (they are not in
+# the output map).
+_IDENTITY_TAGS = {"odr_lane"}
+
+
 def _tag_items(elem):
-    return tuple(sorted((t.get("k"), t.get("v")) for t in elem.findall("tag")))
+    return tuple(sorted((t.get("k"), t.get("v")) for t in elem.findall("tag")
+                        if t.get("k") not in _IDENTITY_TAGS))
 
 
 def _members(elem):
